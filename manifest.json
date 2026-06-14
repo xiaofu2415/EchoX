@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "X 视频翻译器 (X Video Translator)",
+  "version": "1.0.0",
+  "description": "为 X (Twitter) 视频提供实时双语翻译，支持 Gemini、Vertex AI 与 OpenAI 兼容接口。",
+  "permissions": [
+    "storage",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://generativelanguage.googleapis.com/*",
+    "https://aiplatform.googleapis.com/*",
+    "https://*.aiplatform.googleapis.com/*",
+    "https://api.openai.com/*",
+    "https://api.deepseek.com/*",
+    "https://api.minimax.io/*",
+    "https://dashscope.aliyuncs.com/*",
+    "wss://dashscope.aliyuncs.com/*",
+    "https://openrouter.ai/*",
+    "*://*.x.com/*",
+    "*://*.twitter.com/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "src/background/Background.ts",
+    "type": "module"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "视频翻译配置中心"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

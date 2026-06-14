@@ -1,0 +1,27 @@
+{
+  "name": "x-video-translation",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "npm run typecheck",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build && rolldown src/content_script/ContentScript.ts --file dist/content_script.js --format iife --platform browser --minify --transform.target chrome100 && node patch_manifest.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.5.0",
+    "@types/chrome": "^0.1.43",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "terser": "^5.48.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16"
+  }
+}
