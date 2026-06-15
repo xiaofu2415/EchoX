@@ -512,6 +512,11 @@ export const Options: React.FC<OptionsProps> = ({ variant = 'page' }) => {
     }
   };
 
+  const extensionVersion =
+    typeof chrome !== 'undefined' && chrome.runtime?.getManifest
+      ? chrome.runtime.getManifest().version
+      : '1.0.0';
+
   return (
     <main className={`options-shell options-shell--${variant}`}>
       <div className="options-glow options-glow--top" />
@@ -987,9 +992,55 @@ export const Options: React.FC<OptionsProps> = ({ variant = 'page' }) => {
           </div>
         </form>
 
+        <section className="about-card" aria-labelledby="about-title">
+          <div className="about-brand">
+            <img src="icons/icon-128.png" alt="" aria-hidden="true" />
+            <div>
+              <span className="about-kicker">ABOUT ECHOX</span>
+              <h2 id="about-title">关于视频翻译器</h2>
+            </div>
+            <span className="about-version">v{extensionVersion}</span>
+          </div>
+
+          <p className="about-description">
+            EchoX 是一款面向实时视频的双语翻译插件。从世界杯赛事到发布会、
+            访谈和新闻直播，它将英文原文与中文翻译直接呈现在播放器中，
+            让语言不再打断观看体验。
+          </p>
+
+          <div className="about-capabilities" aria-label="核心能力">
+            <span>X 视频与直播</span>
+            <span>YouTube Live</span>
+            <span>Qwen WebSocket 同传</span>
+            <span>本地保存密钥</span>
+          </div>
+
+          <div className="about-recommendation">
+            <strong>实时直播首选千问</strong>
+            <p>
+              推荐使用 DashScope / Qwen 实时多模态语音模型，
+              通过 WebSocket 持续处理音频流，获得更低延迟的直播翻译体验。
+            </p>
+          </div>
+
+          <div className="about-actions">
+            <span>开源项目 · ISC License</span>
+            <a
+              href="https://github.com/xiaofu2415/EchoX"
+              target="_blank"
+              rel="noreferrer"
+            >
+              查看 GitHub
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M7 17 17 7M9 7h8v8" />
+              </svg>
+            </a>
+          </div>
+        </section>
+
         <footer className="options-footer">
           <span>音频密钥与配置仅保存在本地浏览器</span>
-          <span className="footer-version">v1.1</span>
+          <span className="footer-version">v{extensionVersion}</span>
         </footer>
       </section>
     </main>
