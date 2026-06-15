@@ -1,6 +1,6 @@
 <div align="center">
   <img src="icons/icon-128.png" width="112" height="112" alt="Live Video Translator">
-  <h1>视频翻译器</h1>
+  <h1>EchoX视频翻译器</h1>
   <p><a href="README.en.md">English</a> | 简体中文</p>
   <p><strong>完美支持 X 视频/直播与 YouTube 直播的实时中英双语字幕。</strong></p>
   <p>适合观看世界杯等外语直播，边看比赛，边读实时双语字幕。</p>
