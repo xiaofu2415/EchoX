@@ -105,6 +105,144 @@ const TEXT_TRANSLATION_PROMPT =
 const activeRequests = new Map<string, ActiveRequest>();
 const pendingLiveRequests = new Map<string, PendingLiveRequest>();
 const translationContexts = new Map<string, TranslationContext>();
+let offscreenCreationPromise: Promise<void> | null = null;
+let resolveOffscreenReady: (() => void) | null = null;
+let realtimeStartQueue: Promise<void> = Promise.resolve();
+const pendingRealtimeStarts = new Set<string>();
+const cancelledRealtimeStarts = new Set<string>();
+const EXPECTED_MESSAGE_ERRORS =
+  /receiving end does not exist|message port closed|no tab with id/i;
+
+function reportUnexpectedMessageError(
+  context: string,
+  error: unknown
+): void {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (!EXPECTED_MESSAGE_ERRORS.test(detail)) {
+    console.warn(`[Background] ${context} failed:`, error);
+  }
+}
+
+function sendRuntimeMessageSafely(
+  message: Record<string, unknown>,
+  context: string
+): void {
+  try {
+    void chrome.runtime
+      .sendMessage(message)
+      .catch((error: unknown) => reportUnexpectedMessageError(context, error));
+  } catch (error) {
+    reportUnexpectedMessageError(context, error);
+  }
+}
+
+function sendTabMessageSafely(
+  tabId: number,
+  message: unknown,
+  frameId?: number
+): void {
+  try {
+    const request =
+      typeof frameId === 'number'
+        ? chrome.tabs.sendMessage(tabId, message, { frameId })
+        : chrome.tabs.sendMessage(tabId, message);
+    void request.catch((error: unknown) =>
+      reportUnexpectedMessageError('Tab message', error)
+    );
+  } catch (error) {
+    reportUnexpectedMessageError('Tab message', error);
+  }
+}
+
+async function ensureOffscreenDocument(): Promise<void> {
+  const existingContexts = await chrome.runtime.getContexts({
+    contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT]
+  });
+  if (existingContexts.length > 0) {
+    return;
+  }
+
+  if (!offscreenCreationPromise) {
+    offscreenCreationPromise = (async () => {
+      let readyTimer: number | undefined;
+      const readyPromise = new Promise<void>((resolve) => {
+        let settled = false;
+        resolveOffscreenReady = () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (readyTimer !== undefined) {
+            clearTimeout(readyTimer);
+          }
+          resolve();
+        };
+        readyTimer = setTimeout(() => {
+          console.warn('[Background] OFFSCREEN_READY timeout.');
+          resolveOffscreenReady?.();
+        }, 5000);
+      });
+
+      try {
+        await chrome.offscreen.createDocument({
+          url: 'offscreen.html',
+          reasons: [chrome.offscreen.Reason.WORKERS],
+          justification:
+            'Manage WebSocket connections outside of content script CSP restrictions.'
+        });
+      } catch (error) {
+        const contextsAfterError = await chrome.runtime.getContexts({
+          contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT]
+        });
+        if (contextsAfterError.length === 0) {
+          if (readyTimer !== undefined) {
+            clearTimeout(readyTimer);
+          }
+          throw error;
+        }
+      }
+
+      await readyPromise;
+    })().finally(() => {
+      offscreenCreationPromise = null;
+      resolveOffscreenReady = null;
+    });
+  }
+
+  await offscreenCreationPromise;
+}
+
+function sendOffscreenStartMessage(
+  payload: Record<string, unknown>,
+  retries = 15
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const attempt = (remaining: number) => {
+      chrome.runtime.sendMessage(payload, (response) => {
+        if (chrome.runtime.lastError) {
+          if (remaining > 0) {
+            setTimeout(() => attempt(remaining - 1), 200);
+          } else {
+            reject(new Error(chrome.runtime.lastError.message));
+          }
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.error || 'Offscreen session failed to start.'));
+          return;
+        }
+        resolve();
+      });
+    };
+    attempt(retries);
+  });
+}
+
+function enqueueRealtimeStart(task: () => Promise<void>): Promise<void> {
+  const result = realtimeStartQueue.catch(() => undefined).then(task);
+  realtimeStartQueue = result.catch(() => undefined);
+  return result;
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -1081,7 +1219,7 @@ async function processAudioTranslationMessage(
     const subtitleId =
       message.action === 'PROCESS_VOD_AUDIO_SEGMENT'
         ? `vod-${message.timestamp || sequence}`
-        : `live-${sessionId}-${sequence}`;
+        : `live-${sessionId}`;
 
     const rawResponse = await requestTranslation(
       message.audioData,
@@ -1090,7 +1228,7 @@ async function processAudioTranslationMessage(
       controller.signal,
       (partialText: string) => {
         const { textEn, textZh } = parseTranslation(partialText);
-        if (textEn || textZh) {
+        if (textEn.trim() && textZh.trim()) {
           void dispatchBilingualSubtitle(tabId, frameId, {
             id: subtitleId,
             textEn,
@@ -1128,22 +1266,27 @@ async function processAudioTranslationMessage(
       sendResponse?.({ ok: false, stale: true });
       return;
     }
-    if (textEn || textZh) {
+    const hasBilingualText = Boolean(textEn.trim() && textZh.trim());
+    if (hasBilingualText) {
       translationContexts.set(requestKey, {
         previousEn: textEn,
         previousZh: textZh
       });
     }
 
-
-    await dispatchBilingualSubtitle(tabId, frameId, {
-      id: subtitleId,
-      textEn,
-      textZh,
-      isFinal: message.action === 'PROCESS_VOD_AUDIO_SEGMENT',
-      startTime: message.startTime,
-      endTime: message.endTime
-    });
+    if (
+      message.action === 'PROCESS_VOD_AUDIO_SEGMENT' ||
+      hasBilingualText
+    ) {
+      await dispatchBilingualSubtitle(tabId, frameId, {
+        id: subtitleId,
+        textEn,
+        textZh,
+        isFinal: message.action === 'PROCESS_VOD_AUDIO_SEGMENT',
+        startTime: message.startTime,
+        endTime: message.endTime
+      });
+    }
     sendResponse?.({ ok: true });
   } catch (error) {
     if (controller.signal.aborted) {
@@ -1212,140 +1355,129 @@ chrome.runtime.onMessage.addListener(
 
     if ((message as any).action === 'OFFSCREEN_READY') {
       console.log('[Background] Received OFFSCREEN_READY');
-      if ((globalThis as any).offscreenReadyResolver) {
-        (globalThis as any).offscreenReadyResolver();
-        (globalThis as any).offscreenReadyResolver = null;
-      }
+      resolveOffscreenReady?.();
       return false;
     }
 
     if ((message as any).action === 'START_OFFSCREEN_WS') {
       const { apiKey, model, sessionId } = message as any;
       const tabId = sender.tab?.id;
-      
-      // Setup declarativeNetRequest rule for the offscreen document
-      chrome.declarativeNetRequest.updateDynamicRules({
-        removeRuleIds: [1],
-        addRules: [
-          {
-            id: 1,
-            priority: 1,
-            action: {
-              type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS,
-              requestHeaders: [
-                {
-                  header: 'Authorization',
-                  operation: chrome.declarativeNetRequest.HeaderOperation.SET,
-                  value: `Bearer ${apiKey}`
-                }
-              ]
-            },
-            condition: {
-              urlFilter: '*dashscope.aliyuncs.com/api-ws/v1/*',
-              resourceTypes: [chrome.declarativeNetRequest.ResourceType.WEBSOCKET]
-            }
-          }
-        ]
-      }).then(async () => {
-        // Ensure offscreen document exists
-        const path = 'offscreen.html';
-        let isNewDocument = false;
-        try {
-          const existingContexts = await chrome.runtime.getContexts({
-            contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT]
-          });
-          
-          if (existingContexts.length === 0) {
-            isNewDocument = true;
-            
-            const readyPromise = new Promise<void>((resolve) => {
-              (globalThis as any).offscreenReadyResolver = resolve;
-              // Failsafe timeout
-              setTimeout(() => {
-                if ((globalThis as any).offscreenReadyResolver) {
-                  console.warn('[Background] OFFSCREEN_READY timeout!');
-                  resolve();
-                }
-              }, 5000);
-            });
+      const frameId = sender.frameId ?? 0;
 
-            await chrome.offscreen.createDocument({
-              url: path,
-              reasons: [chrome.offscreen.Reason.WORKERS],
-              justification: 'Manage WebSocket connections outside of content script CSP restrictions.'
-            });
-            console.log('[Background] Offscreen document created. Waiting for ready signal...');
-            
-            await readyPromise;
-            console.log('[Background] Offscreen document is officially ready.');
-          }
-        } catch (e: any) {
-          console.error('[Background] Failed to create offscreen doc:', e);
-          sendResponse({ ok: false, error: '创建离屏文档失败: ' + e.message });
-          return;
+      if (
+        typeof sessionId !== 'string' ||
+        !sessionId ||
+        typeof tabId !== 'number'
+      ) {
+        sendResponse({ ok: false, error: 'Invalid realtime session.' });
+        return false;
+      }
+
+      pendingRealtimeStarts.add(sessionId);
+      cancelledRealtimeStarts.delete(sessionId);
+      void enqueueRealtimeStart(async () => {
+        if (cancelledRealtimeStarts.has(sessionId)) {
+          throw new Error('Realtime session start was cancelled.');
         }
 
-        // Robustly send the start_ws message, retrying if necessary
-        const isGummy = model && model.includes('gummy');
-        const wsUrl = isGummy 
-          ? `wss://dashscope.aliyuncs.com/api-ws/v1/inference/` 
-          : `wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=${model}`;
-        
-        const attemptStart = (retries: number) => {
-          chrome.runtime.sendMessage({
+        await chrome.declarativeNetRequest.updateDynamicRules({
+          removeRuleIds: [1],
+          addRules: [
+            {
+              id: 1,
+              priority: 1,
+              action: {
+                type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS,
+                requestHeaders: [
+                  {
+                    header: 'Authorization',
+                    operation: chrome.declarativeNetRequest.HeaderOperation.SET,
+                    value: `Bearer ${apiKey}`
+                  }
+                ]
+              },
+              condition: {
+                urlFilter: '*dashscope.aliyuncs.com/api-ws/v1/*',
+                resourceTypes: [
+                  chrome.declarativeNetRequest.ResourceType.WEBSOCKET
+                ]
+              }
+            }
+          ]
+        });
+
+        await ensureOffscreenDocument();
+        if (cancelledRealtimeStarts.has(sessionId)) {
+          throw new Error('Realtime session start was cancelled.');
+        }
+        const isGummy =
+          typeof model === 'string' && model.includes('gummy');
+        const wsUrl = isGummy
+          ? 'wss://dashscope.aliyuncs.com/api-ws/v1/inference/'
+          : `wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=${encodeURIComponent(model || '')}`;
+
+        await sendOffscreenStartMessage({
             target: 'offscreen',
             action: 'start_ws',
             wsUrl,
             sessionId,
             tabId,
+            frameId,
             model,
             config: {} 
-          }, (response) => {
-            if (chrome.runtime.lastError) {
-              console.error('[Background] Offscreen send warning:', chrome.runtime.lastError.message);
-              if (retries > 0) {
-                setTimeout(() => attemptStart(retries - 1), 200);
-              } else {
-                sendResponse({ ok: false, error: chrome.runtime.lastError.message });
-              }
-            } else {
-              sendResponse({ ok: true });
-            }
+        });
+      })
+        .finally(() => {
+          pendingRealtimeStarts.delete(sessionId);
+          cancelledRealtimeStarts.delete(sessionId);
+        })
+        .then(() => sendResponse({ ok: true }))
+        .catch((error: unknown) => {
+          console.error('[Background] Failed to start offscreen session:', error);
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error)
           });
-        };
-        
-        // If it was already existing, give it a tiny bit of time just in case, otherwise start immediately
-        setTimeout(() => attemptStart(15), isNewDocument ? 0 : 50);
-
-      }).catch((e: any) => {
-        console.error('[Background] Failed to setup offscreen auth rule', e);
-        sendResponse({ ok: false });
-      });
+        });
       return true;
     }
 
     if ((message as any).action === 'SEND_OFFSCREEN_AUDIO') {
-      chrome.runtime.sendMessage({
+      sendRuntimeMessageSafely({
         target: 'offscreen',
         action: 'send_audio',
-        base64Audio: (message as any).base64Audio
-      });
+        base64Audio: (message as any).base64Audio,
+        sessionId: (message as any).sessionId
+      }, 'Offscreen audio message');
       return false;
     }
 
     if ((message as any).action === 'STOP_OFFSCREEN_WS') {
-      chrome.runtime.sendMessage({
+      const sessionId = (message as any).sessionId;
+      if (
+        typeof sessionId === 'string' &&
+        pendingRealtimeStarts.has(sessionId)
+      ) {
+        cancelledRealtimeStarts.add(sessionId);
+      }
+      sendRuntimeMessageSafely({
         target: 'offscreen',
-        action: 'stop_ws'
-      });
+        action: 'stop_ws',
+        sessionId
+      }, 'Offscreen stop message');
       return false;
     }
 
     // Forward messages from Offscreen back to the correct Content Script
-    if ((message as any).action === 'OFFSCREEN_WS_SUBTITLE' || (message as any).action === 'OFFSCREEN_WS_ERROR') {
+    if (
+      (message as any).action === 'OFFSCREEN_WS_SUBTITLE' ||
+      (message as any).action === 'OFFSCREEN_WS_ERROR' ||
+      (message as any).action === 'OFFSCREEN_WS_NETWORK_PROFILE'
+    ) {
       const targetTabId = (message as any).tabId;
-      if (targetTabId) {
-        chrome.tabs.sendMessage(targetTabId, message);
+      const targetFrameId = (message as any).frameId;
+      if (typeof targetTabId === 'number') {
+        sendTabMessageSafely(targetTabId, message, targetFrameId);
       }
       return false;
     }
@@ -1363,10 +1495,10 @@ chrome.runtime.onMessage.addListener(
 
     if (message.action === 'CLEAR_BILINGUAL_SUBTITLES') {
       if (tabId !== undefined) {
-        void chrome.tabs.sendMessage(
+        sendTabMessageSafely(
           tabId,
           { action: 'CLEAR_BILINGUAL_SUBTITLES' },
-          { frameId }
+          frameId
         );
       }
       sendResponse({ ok: true });

@@ -1,3 +1,5 @@
+import { sendRuntimeMessageSafely } from './RuntimeMessaging.js';
+
 /**
  * VodInterceptor.ts - Fetch Interception Engine for VOD Audio Streams
  * 
@@ -155,12 +157,12 @@ export function initializeVodInterceptor(): void {
         const base64Audio = await arrayBufferToBase64(data);
 
         // Forward to the Background script using Chrome runtime messaging
-        chrome.runtime.sendMessage({
+        sendRuntimeMessageSafely({
           action: 'PROCESS_VOD_AUDIO_SEGMENT',
           url: url,
           audioData: base64Audio,
           timestamp: Date.now()
-        });
+        }, 'VodInterceptor');
       } catch (err) {
         console.error('[VodInterceptor] Failed to process and forward audio segment:', err);
       }

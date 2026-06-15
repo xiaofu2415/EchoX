@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "X 视频翻译器 (X Video Translator)",
+  "name": "视频翻译器 (Live Video Translator)",
   "version": "1.0.0",
-  "description": "为 X (Twitter) 视频提供实时双语翻译，支持 Gemini、Vertex AI 与 OpenAI 兼容接口。",
+  "description": "为 X 视频和 YouTube 直播提供实时双语翻译，支持 Gemini、Vertex AI 与 OpenAI 兼容接口。",
   "permissions": [
     "storage",
     "declarativeNetRequest",
@@ -20,7 +20,8 @@
     "wss://dashscope.aliyuncs.com/*",
     "https://openrouter.ai/*",
     "*://*.x.com/*",
-    "*://*.twitter.com/*"
+    "*://*.twitter.com/*",
+    "*://*.youtube.com/*"
   ],
   "optional_host_permissions": [
     "https://*/*",
@@ -31,9 +32,21 @@
     "type": "module"
   },
 
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "视频翻译配置中心"
+    "default_title": "视频翻译配置中心",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
   },
   "options_ui": {
     "page": "options.html",

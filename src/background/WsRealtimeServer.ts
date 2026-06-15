@@ -19,13 +19,21 @@ export function setupWsRealtimeServer() {
     }
 
     function sendUpdate(isFinal: boolean) {
-      void chrome.tabs.sendMessage(tabId!, {
-        action: 'UPDATE_BILINGUAL_SUBTITLES',
-        id: `live-${wsSessionId}-ws-${wsSequence}`,
-        textEn: currentEn,
-        textZh: currentZh,
-        isFinal
-      }, { frameId });
+      if (!currentEn.trim() || !currentZh.trim()) {
+        return;
+      }
+
+      sendTabMessageSafely(
+        tabId!,
+        frameId!,
+        {
+          action: 'UPDATE_BILINGUAL_SUBTITLES',
+          id: `live-${wsSessionId}`,
+          textEn: currentEn,
+          textZh: currentZh,
+          isFinal
+        }
+      );
     }
 
     port.onMessage.addListener(async (msg) => {
@@ -195,11 +203,33 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 function sendErrorSubtitle(tabId: number, frameId: number, sessionId: string, msg: string) {
-  void chrome.tabs.sendMessage(tabId, {
+  sendTabMessageSafely(tabId, frameId, {
     action: 'UPDATE_BILINGUAL_SUBTITLES',
     id: `error-${sessionId}`,
     textEn: '',
     textZh: msg,
     isFinal: false
-  }, { frameId });
+  });
+}
+
+function sendTabMessageSafely(
+  tabId: number,
+  frameId: number,
+  message: unknown
+): void {
+  try {
+    void chrome.tabs
+      .sendMessage(tabId, message, { frameId })
+      .catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (!/receiving end does not exist|message port closed|no tab with id/i.test(detail)) {
+          console.warn('[WsRealtimeServer] Failed to send tab message:', error);
+        }
+      });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (!/receiving end does not exist|message port closed|no tab with id/i.test(detail)) {
+      console.warn('[WsRealtimeServer] Failed to send tab message:', error);
+    }
+  }
 }

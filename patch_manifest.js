@@ -9,7 +9,8 @@ manifest.content_scripts = [
   {
     "matches": [
       "*://*.x.com/*",
-      "*://*.twitter.com/*"
+      "*://*.twitter.com/*",
+      "*://*.youtube.com/*"
     ],
     "js": [
       "content_script.js"

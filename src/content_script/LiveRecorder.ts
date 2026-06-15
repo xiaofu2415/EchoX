@@ -1,3 +1,5 @@
+import { sendRuntimeMessageSafely } from './RuntimeMessaging.js';
+
 /**
  * LiveRecorder.ts - Sliding Window Slice Engine for Live Audio Streams
  * 
@@ -231,7 +233,7 @@ export class LiveRecorder {
         return;
       }
 
-      chrome.runtime.sendMessage({
+      sendRuntimeMessageSafely({
         action: 'TRANSLATE_LIVE_AUDIO_CHUNK',
         audioData: base64Audio,
         mimeType: (blob.type || this.mimeType || 'audio/webm').split(';')[0],
@@ -242,7 +244,7 @@ export class LiveRecorder {
         sessionId: this.sessionId,
         sequence,
         timestamp: Date.now()
-      });
+      }, 'LiveRecorder');
 
       console.log(
         `[LiveRecorder] Dispatched valid audio window: size=${blob.size} bytes, duration=${durationMs}ms, sequence=${sequence}`

@@ -2,7 +2,12 @@ import { initializeButtonInjector, stopButtonInjector } from './ButtonInjector.j
 import { initializeVodInterceptor } from './VodInterceptor.js';
 
 initializeButtonInjector();
-initializeVodInterceptor();
+if (
+  location.hostname.endsWith('x.com') ||
+  location.hostname.endsWith('twitter.com')
+) {
+  initializeVodInterceptor();
+}
 
 window.addEventListener('pagehide', () => {
   stopButtonInjector();

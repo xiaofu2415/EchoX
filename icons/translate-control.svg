@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="translateGradient" x1="3" y1="3" x2="29" y2="29" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2CD7F2"/>
+      <stop offset=".5" stop-color="#3C82F6"/>
+      <stop offset="1" stop-color="#8D4CF0"/>
+    </linearGradient>
+    <linearGradient id="translateSheen" x1="7" y1="2" x2="24" y2="30" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF" stop-opacity=".2"/>
+      <stop offset=".48" stop-color="#FFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="url(#translateGradient)"/>
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="url(#translateSheen)"/>
+  <rect x="1.65" y="1.65" width="28.7" height="28.7" rx="7.35" fill="none" stroke="#FFF" stroke-opacity=".18" stroke-width=".7"/>
+
+  <path d="M9.7 5.2L11.2 9.3L15.3 10.8L11.2 12.3L9.7 16.4L8.2 12.3L4.1 10.8L8.2 9.3L9.7 5.2Z" fill="#FFF"/>
+
+  <path d="M17.1 6.8C21.6 5.45 25.55 7.25 26.45 11.35" fill="none" stroke="#FFF" stroke-width="2.45" stroke-linecap="round"/>
+  <path d="M23.35 9.45L26.6 11.75L28.05 8.2" fill="none" stroke="#FFF" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <path d="M14.9 25.2C10.4 26.55 6.45 24.75 5.55 20.65" fill="none" stroke="#FFF" stroke-width="2.45" stroke-linecap="round"/>
+  <path d="M8.65 22.55L5.4 20.25L3.95 23.8" fill="none" stroke="#FFF" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="16.1" y="15.25" width="12.1" height="3.55" rx=".7" fill="#FFF"/>
+  <rect x="20.3" y="17.8" width="3.7" height="10.35" rx=".65" fill="#FFF"/>
+</svg>

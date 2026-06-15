@@ -1,28 +1,32 @@
+import { sendRuntimeMessageSafely } from './RuntimeMessaging.js';
+
 /**
  * WsRealtimeClient - Content-script side WebSocket realtime translation engine.
  * 
- * ARCHITECTURE NOTE: The WebSocket is created HERE in the content script, NOT in the
- * background service worker. This is because Chrome's declarativeNetRequest can reliably
- * inject Authorization headers into WebSocket upgrade requests from content scripts,
- * but NOT from service workers (known Chromium bug).
+ * The content script captures and batches PCM audio. A singleton offscreen document owns
+ * the WebSockets, with each browser tab isolated by sessionId.
  * 
  * Flow:
  * 1. Content script asks background to setup declarativeNetRequest auth rule
- * 2. Content script creates WebSocket directly (declarativeNetRequest injects auth header)
- * 3. Content script handles audio capture, encoding, and WS communication
+ * 2. Background creates/uses the offscreen document
+ * 3. Content script captures and encodes audio for its session
  * 4. Content script dispatches subtitle updates to SubtitleManager
  */
 
 export class WsRealtimeClient {
+  private static readonly DEFAULT_BATCH_MS = 128;
   private stream: MediaStream;
   private sessionId: string;
   private audioContext: AudioContext | null = null;
   private processor: ScriptProcessorNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
-  private ws: WebSocket | null = null;
-  private wsSequence = 0;
   private currentEn = '';
   private currentZh = '';
+  private targetBatchMs = WsRealtimeClient.DEFAULT_BATCH_MS;
+  private pendingPcmChunks: Int16Array[] = [];
+  private pendingSampleCount = 0;
+  private messageListener: ((msg: any) => void) | null = null;
+  private stopped = false;
 
   constructor(stream: MediaStream, sessionId: string) {
     this.stream = stream;
@@ -31,6 +35,9 @@ export class WsRealtimeClient {
   }
 
   public async start(config: any) {
+    if (this.stopped) {
+      throw new Error('WebSocket realtime client has already been stopped.');
+    }
     console.log('[WsRealtimeClient] Starting WebSocket Realtime Engine via Offscreen Document...');
     
     const apiKey = config.openaiApiKey || config.vertexApiKey || config.geminiApiKey;
@@ -67,8 +74,9 @@ export class WsRealtimeClient {
     }
     this.source = this.audioContext.createMediaStreamSource(this.stream);
     
-    // 1024 frames at 16kHz = 64ms per chunk
-    this.processor = this.audioContext.createScriptProcessor(1024, 1, 1);
+    // 512 frames at 16kHz is 32ms. Several samples may be merged
+    // into one network packet after the WebSocket latency profile arrives.
+    this.processor = this.audioContext.createScriptProcessor(512, 1, 1);
     
     this.processor.onaudioprocess = (e) => {
       const inputData = e.inputBuffer.getChannelData(0);
@@ -80,12 +88,16 @@ export class WsRealtimeClient {
         pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
       }
       
-      // Encode as Base64 and send to Offscreen
-      const base64Audio = this.arrayBufferToBase64(pcm16.buffer);
-      chrome.runtime.sendMessage({
-        action: 'SEND_OFFSCREEN_AUDIO',
-        base64Audio: base64Audio
-      });
+      this.pendingPcmChunks.push(pcm16);
+      this.pendingSampleCount += pcm16.length;
+
+      const sampleRate = this.audioContext?.sampleRate || 16000;
+      const targetSamples = Math.ceil(
+        sampleRate * (this.targetBatchMs / 1000)
+      );
+      if (this.pendingSampleCount >= targetSamples) {
+        this.flushAudioBuffer();
+      }
     };
     
     this.source.connect(this.processor);
@@ -93,10 +105,24 @@ export class WsRealtimeClient {
   }
 
   public stop() {
+    if (this.stopped) {
+      return;
+    }
+    this.stopped = true;
     console.log('[WsRealtimeClient] Stopping WebSocket Realtime Engine...');
-    chrome.runtime.sendMessage({ action: 'STOP_OFFSCREEN_WS' });
+    this.flushAudioBuffer();
+    sendRuntimeMessageSafely({
+      action: 'STOP_OFFSCREEN_WS',
+      sessionId: this.sessionId
+    }, 'WsRealtimeClient');
+
+    if (this.messageListener) {
+      chrome.runtime.onMessage.removeListener(this.messageListener);
+      this.messageListener = null;
+    }
     
     if (this.processor) {
+      this.processor.onaudioprocess = null;
       this.processor.disconnect();
       this.processor = null;
     }
@@ -108,19 +134,107 @@ export class WsRealtimeClient {
       void this.audioContext.close();
       this.audioContext = null;
     }
+    this.pendingPcmChunks = [];
+    this.pendingSampleCount = 0;
   }
 
   private setupMessageListener() {
-    chrome.runtime.onMessage.addListener((msg) => {
+    this.messageListener = (msg: any) => {
+      if (msg.sessionId !== this.sessionId) {
+        return;
+      }
+
       if (msg.action === 'OFFSCREEN_WS_SUBTITLE') {
         this.dispatchSubtitle(msg.id, msg.textEn, msg.textZh, msg.isFinal);
-      } else if (msg.action === 'OFFSCREEN_WS_ERROR' && msg.sessionId === this.sessionId) {
+      } else if (msg.action === 'OFFSCREEN_WS_NETWORK_PROFILE') {
+        this.applyNetworkProfile(msg);
+      } else if (msg.action === 'OFFSCREEN_WS_ERROR') {
         this.dispatchSubtitle(`error-${this.sessionId}`, '', msg.message, false);
       }
-    });
+    };
+    chrome.runtime.onMessage.addListener(this.messageListener);
+  }
+
+  private applyNetworkProfile(profile: {
+    connectLatencyMs?: number;
+    protocolLatencyMs?: number;
+  }) {
+    const measuredLatency =
+      typeof profile.protocolLatencyMs === 'number' &&
+      profile.protocolLatencyMs > 0
+        ? profile.protocolLatencyMs
+        : profile.connectLatencyMs || 0;
+    const nextBatchMs = this.selectBatchDuration(measuredLatency);
+
+    if (nextBatchMs !== this.targetBatchMs) {
+      this.flushAudioBuffer();
+      this.targetBatchMs = nextBatchMs;
+    }
+
+    console.log(
+      `[WsRealtimeClient] Network latency=${Math.round(measuredLatency)}ms, audio batch=${this.targetBatchMs}ms.`
+    );
+
+    this.dispatchSubtitle(
+      `network-${this.sessionId}`,
+      `Network latency: ${Math.round(measuredLatency)}ms · Audio batch: ${this.targetBatchMs}ms`,
+      `网络延迟约 ${Math.round(measuredLatency)}ms · 音频发送间隔 ${this.targetBatchMs}ms`,
+      true
+    );
+  }
+
+  private selectBatchDuration(latencyMs: number): number {
+    if (latencyMs <= 45) return 32;
+    if (latencyMs <= 80) return 64;
+    if (latencyMs <= 160) return 128;
+    if (latencyMs <= 300) return 192;
+    return 256;
+  }
+
+  private flushAudioBuffer() {
+    if (this.pendingSampleCount === 0) {
+      return;
+    }
+
+    const merged = new Int16Array(this.pendingSampleCount);
+    let offset = 0;
+    for (const chunk of this.pendingPcmChunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    this.pendingPcmChunks = [];
+    this.pendingSampleCount = 0;
+    sendRuntimeMessageSafely({
+      action: 'SEND_OFFSCREEN_AUDIO',
+      base64Audio: this.arrayBufferToBase64(merged.buffer),
+      sessionId: this.sessionId
+    }, 'WsRealtimeClient');
   }
 
   private dispatchSubtitle(id: string, textEn: string, textZh: string, isFinal: boolean) {
+    if (id.startsWith(`live-${this.sessionId}`)) {
+      if (textEn.trim()) {
+        this.currentEn = textEn.trim();
+      }
+      if (textZh.trim()) {
+        this.currentZh = textZh.trim();
+      }
+
+      if (!this.currentEn || !this.currentZh) {
+        return;
+      }
+
+      id = `live-${this.sessionId}`;
+      textEn = this.currentEn;
+      textZh = this.currentZh;
+
+      if (isFinal) {
+        this.currentEn = '';
+        this.currentZh = '';
+      }
+    }
+
     // Dispatch directly to the content script's own message listener
     // (SubtitleManager listens via chrome.runtime.onMessage)
     window.dispatchEvent(new CustomEvent('ws-subtitle-update', {

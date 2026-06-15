@@ -1,5 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { createRoot, Root } from 'react-dom/client';
+import {
+  DEFAULT_SUBTITLE_SETTINGS,
+  SUBTITLE_SETTING_KEYS,
+  readSubtitleSettings,
+  type SubtitleDisplaySettings
+} from '../shared/SubtitleSettings.js';
+import type { SupportedSite } from './PlayerAdapter.js';
 
 export interface SubtitleItem {
   id: string;
@@ -13,6 +20,25 @@ export interface SubtitleItem {
 
 interface SubtitleManagerProps {
   video: HTMLVideoElement;
+  layoutElement: HTMLElement;
+  site: SupportedSite;
+}
+
+function isVideoFullscreen(
+  video: HTMLVideoElement,
+  layoutElement: HTMLElement
+): boolean {
+  const fullscreenElement =
+    document.fullscreenElement ||
+    (document as Document & { webkitFullscreenElement?: Element | null })
+      .webkitFullscreenElement;
+  return Boolean(
+    fullscreenElement &&
+      (fullscreenElement === video ||
+        fullscreenElement === layoutElement ||
+        fullscreenElement.contains(video) ||
+        fullscreenElement.contains(layoutElement))
+  );
 }
 
 /**
@@ -21,30 +47,71 @@ interface SubtitleManagerProps {
  * Renders bilingual subtitles overlay (English top, Chinese bottom) on top of the video.
  * Handles dynamic hot-overwriting when receiving updates with the same subtitle ID.
  */
-export const SubtitleManager: React.FC<SubtitleManagerProps> = ({ video }) => {
+export const SubtitleManager: React.FC<SubtitleManagerProps> = ({
+  video,
+  layoutElement,
+  site
+}) => {
   const [subtitles, setSubtitles] = useState<SubtitleItem[]>([]);
   const [currentTime, setCurrentTime] = useState(video.currentTime || 0);
   const [displayMode, setDisplayMode] = useState<'bilingual' | 'chinese'>('bilingual');
+  const [displaySettings, setDisplaySettings] =
+    useState<SubtitleDisplaySettings>(DEFAULT_SUBTITLE_SETTINGS);
+  const [playerLayout, setPlayerLayout] = useState(() => ({
+    width: layoutElement.getBoundingClientRect().width,
+    height: layoutElement.getBoundingClientRect().height,
+    isFullscreen: isVideoFullscreen(video, layoutElement)
+  }));
 
   useEffect(() => {
     // 1. Fetch initial configuration
-    chrome.storage.local.get('displayMode', (res: { [key: string]: any }) => {
+    chrome.storage.local.get(
+      ['displayMode', ...SUBTITLE_SETTING_KEYS],
+      (res: Record<string, unknown>) => {
       if (res.displayMode) {
         setDisplayMode(res.displayMode as 'bilingual' | 'chinese');
       }
-    });
+        setDisplaySettings(readSubtitleSettings(res));
+      }
+    );
 
     // 2. Listen to dynamic configuration updates (e.g. from the Options page)
     const handleStorageChange = (changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => {
       if (areaName === 'local' && changes.displayMode) {
         setDisplayMode((changes.displayMode.newValue as 'bilingual' | 'chinese') || 'bilingual');
       }
+      if (
+        areaName === 'local' &&
+        SUBTITLE_SETTING_KEYS.some((key) => changes[key])
+      ) {
+        chrome.storage.local.get(
+          SUBTITLE_SETTING_KEYS,
+          (result: Record<string, unknown>) => {
+            setDisplaySettings(readSubtitleSettings(result));
+          }
+        );
+      }
     };
     chrome.storage.onChanged.addListener(handleStorageChange);
 
     const updateSubtitles = (id: string, textEn: string, textZh: string, isFinal: boolean, startTime?: number, endTime?: number) => {
+      const normalizedEn = typeof textEn === 'string' ? textEn.trim() : '';
+      const normalizedZh = typeof textZh === 'string' ? textZh.trim() : '';
+
+      // Live providers often stream the source transcript and translation in
+      // separate events. Keep the last complete pair visible until both arrive.
+      if (id.startsWith('live-') && (!normalizedEn || !normalizedZh)) {
+        return;
+      }
+
       const updatedItem: SubtitleItem = {
-        id, textEn, textZh, isFinal, startTime, endTime, receivedAt: Date.now()
+        id,
+        textEn: normalizedEn,
+        textZh: normalizedZh,
+        isFinal,
+        startTime,
+        endTime,
+        receivedAt: Date.now()
       };
       setSubtitles((prev) => {
         const index = prev.findIndex((item) => item.id === id);
@@ -101,6 +168,30 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({ video }) => {
     return () => window.cancelAnimationFrame(animationFrameId);
   }, [video]);
 
+  useEffect(() => {
+    const updateLayout = () => {
+      const rect = layoutElement.getBoundingClientRect();
+      setPlayerLayout({
+        width: rect.width,
+        height: rect.height,
+        isFullscreen: isVideoFullscreen(video, layoutElement)
+      });
+    };
+    const resizeObserver = new ResizeObserver(updateLayout);
+    resizeObserver.observe(layoutElement);
+    document.addEventListener('fullscreenchange', updateLayout);
+    document.addEventListener('webkitfullscreenchange', updateLayout);
+    window.addEventListener('resize', updateLayout);
+    updateLayout();
+
+    return () => {
+      resizeObserver.disconnect();
+      document.removeEventListener('fullscreenchange', updateLayout);
+      document.removeEventListener('webkitfullscreenchange', updateLayout);
+      window.removeEventListener('resize', updateLayout);
+    };
+  }, [video, layoutElement]);
+
   const now = Date.now();
   const activeSubtitles = subtitles.filter((subtitle) => {
     if (!subtitle.isFinal && now - subtitle.receivedAt <= 6500) {
@@ -122,9 +213,13 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({ video }) => {
     return currentTime >= showFrom && currentTime <= showUntil;
   });
 
+  const isCompactPlayer =
+    !playerLayout.isFullscreen &&
+    (playerLayout.height < 720 || playerLayout.width < 1200);
+  const visibleLimit = isCompactPlayer ? 1 : 2;
   const visibleSubtitles =
     activeSubtitles.length > 0
-      ? activeSubtitles.slice(-2)
+      ? activeSubtitles.slice(-visibleLimit)
       : subtitles
           .filter(
             (subtitle) =>
@@ -138,18 +233,34 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({ video }) => {
     return null;
   }
 
+  const configuredBottomPx =
+    playerLayout.height * (displaySettings.subtitleBottomPercent / 100);
+  const compactControlClearancePx = Math.min(
+    96,
+    Math.max(72, playerLayout.height * 0.12)
+  );
+  const youtubeFullscreenClearancePx =
+    site === 'youtube' && playerLayout.isFullscreen
+      ? playerLayout.height * 0.11
+      : 0;
+  const subtitleBottomPx = Math.max(
+    configuredBottomPx,
+    isCompactPlayer ? compactControlClearancePx : 0,
+    youtubeFullscreenClearancePx
+  );
+
   // Visual Styling constants for clean rendering on top of arbitrary video screens
   const containerStyle: React.CSSProperties = {
     position: 'absolute',
-    bottom: '8%',
+    bottom: `${subtitleBottomPx}px`,
     left: '50%',
     transform: 'translateX(-50%)',
-    width: '85%',
-    maxWidth: '800px',
+    width: isCompactPlayer ? '76%' : '85%',
+    maxWidth: isCompactPlayer ? '680px' : '800px',
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    gap: '8px',
+    gap: isCompactPlayer ? '6px' : '8px',
     pointerEvents: 'none',
     zIndex: 9999,
     fontFamily: '"Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
@@ -160,11 +271,13 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({ video }) => {
     '2px 2px 4px rgba(0, 0, 0, 0.9), -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000';
 
   const subtitleBoxStyle: React.CSSProperties = {
-    background: 'rgba(0, 0, 0, 0.65)',
+    background: `rgba(0, 0, 0, ${
+      displaySettings.subtitleBackgroundOpacity / 100
+    })`,
     backdropFilter: 'blur(6px)',
     WebkitBackdropFilter: 'blur(6px)',
-    borderRadius: '12px',
-    padding: '8px 18px',
+    borderRadius: isCompactPlayer ? '10px' : '12px',
+    padding: isCompactPlayer ? '6px 14px' : '8px 18px',
     width: '100%',
     boxSizing: 'border-box',
     display: 'flex',
@@ -176,23 +289,23 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({ video }) => {
   };
 
   const englishStyle: React.CSSProperties = {
-    fontSize: '15px', // Approximately 70% of Chinese size (22px)
+    fontSize: `${displaySettings.subtitleEnglishFontSize}px`,
     color: 'rgba(255, 255, 255, 0.75)', // Light grey / semi-transparent
     marginBottom: '4px',
     textShadow: textShadowStyle,
     wordBreak: 'break-word',
     lineHeight: '1.4',
-    minHeight: '21px' // Ensure stable height even if empty
+    minHeight: `${Math.ceil(displaySettings.subtitleEnglishFontSize * 1.4)}px`
   };
 
   const chineseStyle: React.CSSProperties = {
-    fontSize: '21px', // Main subtitle
+    fontSize: `${displaySettings.subtitleChineseFontSize}px`,
     color: '#FFFFFF', // Pure white
     fontWeight: 'bold', // Bolded
     textShadow: textShadowStyle,
     wordBreak: 'break-word',
     lineHeight: '1.4',
-    minHeight: '29px' // Ensure stable height even if empty
+    minHeight: `${Math.ceil(displaySettings.subtitleChineseFontSize * 1.4)}px`
   };
 
   return (
@@ -220,21 +333,25 @@ const mountedRoots = new Map<HTMLElement, Root>();
  * 
  * @param video The target HTMLVideoElement to overlay subtitles on.
  */
-export function mountSubtitleManager(video: HTMLVideoElement): HTMLElement {
-  // Find or create container overlay
-  const videoParent = video.parentElement;
-  if (!videoParent) {
-    throw new Error('[SubtitleManager] Video element has no parent container.');
+export function mountSubtitleManager(
+  video: HTMLVideoElement,
+  overlayParent: HTMLElement = video.parentElement as HTMLElement,
+  site: SupportedSite = 'x'
+): HTMLElement {
+  if (!overlayParent) {
+    throw new Error('[SubtitleManager] Video element has no overlay container.');
   }
 
   // Ensure parent layout is relative/absolute to correctly position absolute subtitles
-  const parentStyle = window.getComputedStyle(videoParent);
+  const parentStyle = window.getComputedStyle(overlayParent);
   if (parentStyle.position === 'static') {
-    videoParent.style.position = 'relative';
+    overlayParent.style.position = 'relative';
   }
 
   // Check if overlay container already exists
-  let overlay = videoParent.querySelector('.x-video-translation-subtitle-overlay') as HTMLElement;
+  let overlay = overlayParent.querySelector(
+    ':scope > .x-video-translation-subtitle-overlay'
+  ) as HTMLElement;
   if (overlay) {
     return overlay;
   }
@@ -250,7 +367,7 @@ export function mountSubtitleManager(video: HTMLVideoElement): HTMLElement {
   overlay.style.pointerEvents = 'none';
   overlay.style.zIndex = '9998';
 
-  videoParent.appendChild(overlay);
+  overlayParent.appendChild(overlay);
 
   // Mount React Component inside Shadow DOM to isolate styles from webpage CSS
   const shadow = overlay.attachShadow({ mode: 'open' });
@@ -264,7 +381,13 @@ export function mountSubtitleManager(video: HTMLVideoElement): HTMLElement {
   const root = (globalThis as any).createRoot
     ? (globalThis as any).createRoot(shadowContainer)
     : createRoot(shadowContainer);
-  root.render(<SubtitleManager video={video} />);
+  root.render(
+    <SubtitleManager
+      video={video}
+      layoutElement={overlayParent}
+      site={site}
+    />
+  );
   mountedRoots.set(overlay, root);
 
   console.log('[SubtitleManager] React component successfully mounted inside Shadow DOM over video player.');
