@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "视频翻译器 (Live Video Translator)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "为 X 视频和 YouTube 直播提供实时双语翻译，支持 Gemini、Vertex AI 与 OpenAI 兼容接口。",
   "permissions": [
     "storage",
