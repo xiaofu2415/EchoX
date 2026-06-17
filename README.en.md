@@ -56,11 +56,11 @@ For low-latency WebSocket streaming translation, DashScope's Qwen real-time mult
 
 | Qwen model | Role | Best for |
 | --- | --- | --- |
-| `qwen3.5-livetranslate-flash-realtime` | Recommended default | Low-latency translation for World Cup matches, interviews, and live news |
-| `qwen3-livetranslate-flash-realtime` | Alternative real-time model | Full-duplex WebSocket speech translation |
-| `gummy-realtime-v1` | Native bilingual interpretation | Direct bilingual output |
+| `qwen3.5-livetranslate-flash-realtime` | Recommended default | Chinese-English live translation with bilingual audio+text output, ideal for World Cup matches, interviews, and live news |
+| `qwen3-livetranslate-flash-realtime` | Alternative bilingual model | Chinese-English live translation with bilingual audio+text output |
+| `gummy-realtime-v1` | Legacy model | Expected to be retired starting in September; not recommended for new setups |
 
-A WebSocket pipeline continuously sends player audio to the model. The selected model must therefore accept and understand audio streams directly. Text-only models cannot run this pipeline on their own and require a separate STT stage. Qwen's native real-time audio support makes it the preferred configuration for live translation.
+A WebSocket pipeline continuously sends player audio to the model. The selected model must therefore accept and understand audio streams directly. Text-only models cannot run this pipeline on their own and require a separate STT stage. Qwen3.5 / Qwen3 real-time bilingual translation models natively support audio streams and bilingual text output, making them the preferred configuration for live translation.
 
 > DeepSeek is not a multimodal audio model. The extension must first transcribe the audio through an STT provider and then send the resulting text to DeepSeek for translation.
 

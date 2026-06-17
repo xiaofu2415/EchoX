@@ -22,6 +22,8 @@ import {
   type SubtitleDisplaySettings
 } from '../shared/SubtitleSettings.js';
 
+type DisplayMode = 'bilingual' | 'chinese';
+
 let pollIntervalId: any = null;
 let activeRecorder: LiveRecorder | null = null;
 let activeWsClient: WsRealtimeClient | null = null;
@@ -40,6 +42,8 @@ let isWaitingForSubtitle = false;
 const activeVideoListeners = new Map<string, EventListener>();
 const controlVisibilityHandlers = new WeakMap<HTMLElement, EventListener>();
 const controlVisibilityTimers = new WeakMap<HTMLElement, number>();
+const EXPECTED_RUNTIME_ERRORS =
+  /extension context invalidated|receiving end does not exist|message port closed/i;
 const webAudioCaptures = new WeakMap<
   HTMLVideoElement,
   {
@@ -179,6 +183,17 @@ function createSettingsPanel(
     display: 'grid',
     gap: '16px'
   });
+  const settingsControls = document.createElement('div');
+  Object.assign(settingsControls.style, {
+    display: 'none',
+    gap: '16px'
+  });
+
+  const showSettingsPage = (show: boolean) => {
+    controls.style.display = show ? 'none' : 'grid';
+    settingsControls.style.display = show ? 'grid' : 'none';
+    title.textContent = show ? '设置' : '视频翻译';
+  };
 
   const statusCard = document.createElement('div');
   Object.assign(statusCard.style, {
@@ -271,6 +286,208 @@ function createSettingsPanel(
   autoRow.append(autoCopy, autoToggle);
   controls.appendChild(autoRow);
 
+  const sessionBilingualRow = document.createElement('label');
+  Object.assign(sessionBilingualRow.style, {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '16px',
+    padding: '2px 2px 12px',
+    borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+    cursor: 'pointer'
+  });
+  const sessionBilingualCopy = document.createElement('span');
+  Object.assign(sessionBilingualCopy.style, {
+    display: 'grid',
+    gap: '3px'
+  });
+  const sessionBilingualTitle = document.createElement('strong');
+  sessionBilingualTitle.textContent = '仅本次开启双语字幕';
+  sessionBilingualTitle.style.fontSize = '13px';
+  const sessionBilingualDescription = document.createElement('small');
+  sessionBilingualDescription.textContent = '不修改默认字幕显示设置';
+  sessionBilingualDescription.style.color = '#8b96aa';
+  sessionBilingualCopy.append(
+    sessionBilingualTitle,
+    sessionBilingualDescription
+  );
+  const sessionBilingualToggle = document.createElement('input');
+  sessionBilingualToggle.type = 'checkbox';
+  sessionBilingualToggle.id = 'x-translator-session-bilingual-toggle';
+  Object.assign(sessionBilingualToggle.style, {
+    width: '19px',
+    height: '19px',
+    accentColor: '#788fff',
+    cursor: 'pointer'
+  });
+  sessionBilingualToggle.onchange = () => {
+    window.dispatchEvent(
+      new CustomEvent('echox-display-mode-override', {
+        detail: {
+          mode: sessionBilingualToggle.checked ? 'bilingual' : null
+        }
+      })
+    );
+  };
+  sessionBilingualRow.append(sessionBilingualCopy, sessionBilingualToggle);
+  controls.appendChild(sessionBilingualRow);
+
+  const displayModeSection = document.createElement('div');
+  Object.assign(displayModeSection.style, {
+    display: 'grid',
+    gap: '10px',
+    paddingBottom: '12px',
+    borderBottom: '1px solid rgba(255, 255, 255, 0.1)'
+  });
+  const displayModeTitle = document.createElement('strong');
+  displayModeTitle.textContent = '字幕显示';
+  Object.assign(displayModeTitle.style, {
+    fontSize: '13px',
+    color: '#f4f7ff'
+  });
+  const displayModeGrid = document.createElement('div');
+  Object.assign(displayModeGrid.style, {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: '8px'
+  });
+  const displayModeButtons: Partial<Record<DisplayMode, HTMLButtonElement>> =
+    {};
+  const setDisplayModeButtonState = (mode: DisplayMode) => {
+    (['bilingual', 'chinese'] as DisplayMode[]).forEach((value) => {
+      const button = displayModeButtons[value];
+      if (!button) {
+        return;
+      }
+      const active = value === mode;
+      button.setAttribute('aria-pressed', String(active));
+      button.style.border = active
+        ? '1px solid rgba(120, 143, 255, 0.9)'
+        : '1px solid rgba(255, 255, 255, 0.12)';
+      button.style.background = active
+        ? 'rgba(86, 107, 214, 0.32)'
+        : 'rgba(255, 255, 255, 0.055)';
+      button.style.color = active ? '#fff' : '#b9c1d6';
+      button.style.boxShadow = active
+        ? '0 0 0 1px rgba(120, 143, 255, 0.18) inset'
+        : 'none';
+    });
+  };
+  const addDisplayModeButton = (
+    mode: DisplayMode,
+    titleText: string,
+    description: string
+  ) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('aria-pressed', 'false');
+    Object.assign(button.style, {
+      display: 'grid',
+      gap: '4px',
+      minHeight: '58px',
+      padding: '10px',
+      borderRadius: '12px',
+      textAlign: 'left',
+      cursor: 'pointer',
+      fontFamily: 'inherit'
+    });
+    const titleNode = document.createElement('strong');
+    titleNode.textContent = titleText;
+    titleNode.style.fontSize = '13px';
+    const descNode = document.createElement('small');
+    descNode.textContent = description;
+    descNode.style.color = '#8b96aa';
+    descNode.style.fontSize = '11px';
+    button.append(titleNode, descNode);
+    button.onclick = (event) => {
+      event.stopPropagation();
+      setDisplayModeButtonState(mode);
+      void chrome.storage.local.set({ displayMode: mode });
+    };
+    displayModeButtons[mode] = button;
+    displayModeGrid.appendChild(button);
+  };
+  addDisplayModeButton('bilingual', '双语对照', '英文 / 中文');
+  addDisplayModeButton('chinese', '仅中文', '隐藏英文');
+  setDisplayModeButtonState('bilingual');
+  displayModeSection.append(displayModeTitle, displayModeGrid);
+  controls.appendChild(displayModeSection);
+
+  const settingsRow = document.createElement('button');
+  settingsRow.type = 'button';
+  Object.assign(settingsRow.style, {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '16px',
+    width: '100%',
+    padding: '12px',
+    border: '1px solid rgba(255, 255, 255, 0.12)',
+    borderRadius: '12px',
+    color: '#fff',
+    background: 'rgba(255, 255, 255, 0.055)',
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    textAlign: 'left'
+  });
+  const settingsCopy = document.createElement('span');
+  Object.assign(settingsCopy.style, {
+    display: 'grid',
+    gap: '3px'
+  });
+  const settingsTitle = document.createElement('strong');
+  settingsTitle.textContent = '设置';
+  settingsTitle.style.fontSize = '13px';
+  const settingsDescription = document.createElement('small');
+  settingsDescription.textContent = '调整字号、位置和背景';
+  settingsDescription.style.color = '#8b96aa';
+  const settingsArrow = document.createElement('span');
+  settingsArrow.textContent = '›';
+  Object.assign(settingsArrow.style, {
+    color: '#dfe5ff',
+    fontSize: '24px',
+    lineHeight: '1'
+  });
+  settingsCopy.append(settingsTitle, settingsDescription);
+  settingsRow.append(settingsCopy, settingsArrow);
+  settingsRow.onclick = (event) => {
+    event.stopPropagation();
+    showSettingsPage(true);
+  };
+  controls.appendChild(settingsRow);
+
+  const settingsHeader = document.createElement('div');
+  Object.assign(settingsHeader.style, {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    paddingBottom: '12px',
+    borderBottom: '1px solid rgba(255, 255, 255, 0.1)'
+  });
+  const backButton = document.createElement('button');
+  backButton.type = 'button';
+  backButton.textContent = '‹';
+  Object.assign(backButton.style, {
+    width: '30px',
+    height: '30px',
+    border: '0',
+    borderRadius: '999px',
+    color: '#fff',
+    background: 'rgba(255, 255, 255, 0.08)',
+    cursor: 'pointer',
+    fontSize: '24px',
+    lineHeight: '1'
+  });
+  const settingsHeaderTitle = document.createElement('strong');
+  settingsHeaderTitle.textContent = '字幕设置';
+  settingsHeaderTitle.style.fontSize = '14px';
+  settingsHeader.append(backButton, settingsHeaderTitle);
+  backButton.onclick = (event) => {
+    event.stopPropagation();
+    showSettingsPage(false);
+  };
+  settingsControls.appendChild(settingsHeader);
+
   const addRange = (
     label: string,
     key: keyof SubtitleDisplaySettings,
@@ -309,7 +526,7 @@ function createSettingsPanel(
     };
     row.append(name, output);
     wrapper.append(row, input);
-    controls.appendChild(wrapper);
+    settingsControls.appendChild(wrapper);
 
     return (settings: SubtitleDisplaySettings) => {
       const value = settings[key];
@@ -367,14 +584,16 @@ function createSettingsPanel(
     applyPosition(DEFAULT_SUBTITLE_SETTINGS);
     applyBackgroundOpacity(DEFAULT_SUBTITLE_SETTINGS);
   };
-  controls.appendChild(resetButton);
+  settingsControls.appendChild(resetButton);
   panel.appendChild(controls);
+  panel.appendChild(settingsControls);
   shadow.appendChild(panel);
   videoContainer.appendChild(host);
 
   chrome.storage.local.get(
     [
       ...SUBTITLE_SETTING_KEYS,
+      'displayMode',
       AUTO_TRANSLATE_ON_PLAY_KEY,
       'autoStartTranslation'
     ],
@@ -387,6 +606,9 @@ function createSettingsPanel(
       autoToggle.checked =
         result[AUTO_TRANSLATE_ON_PLAY_KEY] === true ||
         result.autoStartTranslation === true;
+      const displayMode =
+        result.displayMode === 'chinese' ? 'chinese' : 'bilingual';
+      setDisplayModeButtonState(displayMode);
     }
   );
   return host;
@@ -569,7 +791,10 @@ async function maybeAutoStartTranslation(video: HTMLVideoElement): Promise<void>
       await startTranslation(video);
     }
   } catch (error) {
-    console.warn('[ButtonInjector] Auto translation start check failed:', error);
+    const detail = error instanceof Error ? error.message : String(error);
+    if (!EXPECTED_RUNTIME_ERRORS.test(detail)) {
+      console.warn('[ButtonInjector] Auto translation start check failed:', error);
+    }
   }
 }
 
@@ -588,7 +813,7 @@ async function captureVideoAudio(video: HTMLVideoElement): Promise<MediaStream> 
         return stream;
       }
     } catch (error) {
-      console.warn(
+      console.debug(
         '[ButtonInjector] Native media capture failed; trying Web Audio fallback.',
         error
       );
@@ -648,7 +873,13 @@ async function startTranslation(video: HTMLVideoElement): Promise<void> {
     const configError = validateProviderConfig(providerConfig);
     if (configError) {
       alert(configError);
-      await chrome.runtime.openOptionsPage();
+      const response = (await chrome.runtime.sendMessage({
+        action: 'OPEN_OPTIONS_PAGE'
+      })) as { ok?: boolean; error?: string } | undefined;
+      if (!response?.ok) {
+        const url = chrome.runtime.getURL('options.html');
+        window.open(url, '_blank');
+      }
       return;
     }
 

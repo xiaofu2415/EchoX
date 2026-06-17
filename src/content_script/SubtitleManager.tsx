@@ -41,6 +41,43 @@ function isVideoFullscreen(
   );
 }
 
+function compactSubtitleText(
+  text: string,
+  isChinese: boolean,
+  maxLength: number
+): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  const segments = normalized.match(
+    isChinese ? /[^。！？!?，,]+[。！？!?，,]?/g : /[^.!?,]+[.!?,]?/g
+  );
+  if (segments && segments.length > 1) {
+    const selected: string[] = [];
+    let length = 0;
+    for (let index = segments.length - 1; index >= 0; index--) {
+      const segment = segments[index].trim();
+      if (!segment) {
+        continue;
+      }
+      const nextLength = length + segment.length + (selected.length ? 1 : 0);
+      if (selected.length > 0 && nextLength > maxLength) {
+        break;
+      }
+      selected.unshift(segment);
+      length = nextLength;
+    }
+    const compacted = selected.join(isChinese ? '' : ' ').trim();
+    if (compacted) {
+      return compacted;
+    }
+  }
+
+  return normalized.slice(-maxLength).trim();
+}
+
 /**
  * SubtitleManager Component
  * 
@@ -94,9 +131,31 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({
     };
     chrome.storage.onChanged.addListener(handleStorageChange);
 
+    const handleDisplayModeOverride = (event: Event) => {
+      const customEvent = event as CustomEvent<{ mode?: 'bilingual' | null }>;
+      if (customEvent.detail?.mode === 'bilingual') {
+        setDisplayMode('bilingual');
+        return;
+      }
+
+      chrome.storage.local.get(['displayMode'], (res: Record<string, unknown>) => {
+        setDisplayMode(
+          res.displayMode === 'chinese' || res.displayMode === 'bilingual'
+            ? res.displayMode
+            : 'bilingual'
+        );
+      });
+    };
+
     const updateSubtitles = (id: string, textEn: string, textZh: string, isFinal: boolean, startTime?: number, endTime?: number) => {
-      const normalizedEn = typeof textEn === 'string' ? textEn.trim() : '';
-      const normalizedZh = typeof textZh === 'string' ? textZh.trim() : '';
+      const normalizedEn =
+        typeof textEn === 'string'
+          ? compactSubtitleText(textEn, false, 140)
+          : '';
+      const normalizedZh =
+        typeof textZh === 'string'
+          ? compactSubtitleText(textZh, true, 64)
+          : '';
 
       // Live providers often stream the source transcript and translation in
       // separate events. Keep the last complete pair visible until both arrive.
@@ -150,11 +209,19 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({
     // Add listeners
     chrome.runtime.onMessage.addListener(handleMessage);
     window.addEventListener('ws-subtitle-update', handleWsMessage);
+    window.addEventListener(
+      'echox-display-mode-override',
+      handleDisplayModeOverride
+    );
 
     return () => {
       chrome.runtime.onMessage.removeListener(handleMessage);
       chrome.storage.onChanged.removeListener(handleStorageChange);
       window.removeEventListener('ws-subtitle-update', handleWsMessage);
+      window.removeEventListener(
+        'echox-display-mode-override',
+        handleDisplayModeOverride
+      );
     };
   }, []);
 
@@ -216,6 +283,7 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({
   const isCompactPlayer =
     !playerLayout.isFullscreen &&
     (playerLayout.height < 720 || playerLayout.width < 1200);
+  const isXInlinePlayer = site === 'x' && isCompactPlayer;
   const visibleLimit = isCompactPlayer ? 1 : 2;
   const visibleSubtitles =
     activeSubtitles.length > 0
@@ -235,10 +303,9 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({
 
   const configuredBottomPx =
     playerLayout.height * (displaySettings.subtitleBottomPercent / 100);
-  const compactControlClearancePx = Math.min(
-    96,
-    Math.max(72, playerLayout.height * 0.12)
-  );
+  const compactControlClearancePx = isXInlinePlayer
+    ? Math.min(64, Math.max(42, playerLayout.height * 0.08))
+    : Math.min(96, Math.max(72, playerLayout.height * 0.12));
   const youtubeFullscreenClearancePx =
     site === 'youtube' && playerLayout.isFullscreen
       ? playerLayout.height * 0.11
@@ -248,6 +315,26 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({
     isCompactPlayer ? compactControlClearancePx : 0,
     youtubeFullscreenClearancePx
   );
+  const compactFontScale = isXInlinePlayer
+    ? Math.max(
+        0.62,
+        Math.min(
+          0.82,
+          Math.min(playerLayout.width / 1280, playerLayout.height / 720) * 0.78
+        )
+      )
+    : isCompactPlayer
+      ? 0.9
+      : 1;
+  const englishFontSize = Math.max(
+    10,
+    Math.round(displaySettings.subtitleEnglishFontSize * compactFontScale)
+  );
+  const chineseFontSize = Math.max(
+    13,
+    Math.round(displaySettings.subtitleChineseFontSize * compactFontScale)
+  );
+  const subtitleLineHeight = isXInlinePlayer ? 1.24 : 1.4;
 
   // Visual Styling constants for clean rendering on top of arbitrary video screens
   const containerStyle: React.CSSProperties = {
@@ -255,12 +342,16 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({
     bottom: `${subtitleBottomPx}px`,
     left: '50%',
     transform: 'translateX(-50%)',
-    width: isCompactPlayer ? '76%' : '85%',
-    maxWidth: isCompactPlayer ? '680px' : '800px',
+    width: isXInlinePlayer
+      ? 'min(68%, 560px)'
+      : isCompactPlayer
+        ? '76%'
+        : '85%',
+    maxWidth: isXInlinePlayer ? '560px' : isCompactPlayer ? '680px' : '800px',
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    gap: isCompactPlayer ? '6px' : '8px',
+    gap: isXInlinePlayer ? '5px' : isCompactPlayer ? '6px' : '8px',
     pointerEvents: 'none',
     zIndex: 9999,
     fontFamily: '"Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
@@ -276,8 +367,12 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({
     })`,
     backdropFilter: 'blur(6px)',
     WebkitBackdropFilter: 'blur(6px)',
-    borderRadius: isCompactPlayer ? '10px' : '12px',
-    padding: isCompactPlayer ? '6px 14px' : '8px 18px',
+    borderRadius: isXInlinePlayer ? '9px' : isCompactPlayer ? '10px' : '12px',
+    padding: isXInlinePlayer
+      ? '4px 12px'
+      : isCompactPlayer
+        ? '6px 14px'
+        : '8px 18px',
     width: '100%',
     boxSizing: 'border-box',
     display: 'flex',
@@ -289,23 +384,23 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({
   };
 
   const englishStyle: React.CSSProperties = {
-    fontSize: `${displaySettings.subtitleEnglishFontSize}px`,
+    fontSize: `${englishFontSize}px`,
     color: 'rgba(255, 255, 255, 0.75)', // Light grey / semi-transparent
-    marginBottom: '4px',
+    marginBottom: isXInlinePlayer ? '2px' : '4px',
     textShadow: textShadowStyle,
     wordBreak: 'break-word',
-    lineHeight: '1.4',
-    minHeight: `${Math.ceil(displaySettings.subtitleEnglishFontSize * 1.4)}px`
+    lineHeight: subtitleLineHeight,
+    minHeight: `${Math.ceil(englishFontSize * subtitleLineHeight)}px`
   };
 
   const chineseStyle: React.CSSProperties = {
-    fontSize: `${displaySettings.subtitleChineseFontSize}px`,
+    fontSize: `${chineseFontSize}px`,
     color: '#FFFFFF', // Pure white
     fontWeight: 'bold', // Bolded
     textShadow: textShadowStyle,
     wordBreak: 'break-word',
-    lineHeight: '1.4',
-    minHeight: `${Math.ceil(displaySettings.subtitleChineseFontSize * 1.4)}px`
+    lineHeight: subtitleLineHeight,
+    minHeight: `${Math.ceil(chineseFontSize * subtitleLineHeight)}px`
   };
 
   return (

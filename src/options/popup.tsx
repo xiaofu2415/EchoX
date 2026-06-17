@@ -71,6 +71,11 @@ export const Popup: React.FC = () => {
     });
   };
 
+  const selectDisplayMode = async (mode: DisplayMode) => {
+    setDisplayMode(mode);
+    await chrome.storage.local.set({ displayMode: mode });
+  };
+
   const openSettings = async () => {
     if (typeof chrome !== 'undefined' && chrome.runtime?.openOptionsPage) {
       await chrome.runtime.openOptionsPage();
@@ -87,7 +92,7 @@ export const Popup: React.FC = () => {
       <section className="popup-panel">
         <header className="popup-header">
           <div className="brand-mark" aria-hidden="true">
-            <span>译</span>
+            <img src="icons/icon-128.png" alt="" />
           </div>
           <div className="popup-heading">
             <div className="eyebrow">
@@ -109,7 +114,37 @@ export const Popup: React.FC = () => {
           </div>
           <div>
             <span>字幕模式</span>
-            <strong>{displayMode === 'bilingual' ? '双语对照' : '仅中文'}</strong>
+            <div className="popup-mode-grid" role="radiogroup">
+              {([
+                {
+                  value: 'bilingual',
+                  title: '双语对照',
+                  preview: 'EN / 中'
+                },
+                {
+                  value: 'chinese',
+                  title: '仅中文',
+                  preview: '中文'
+                }
+              ] as const).map((option) => {
+                const active = displayMode === option.value;
+                return (
+                  <button
+                    className={`popup-mode-card${
+                      active ? ' popup-mode-card--active' : ''
+                    }`}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    key={option.value}
+                    onClick={() => selectDisplayMode(option.value)}
+                  >
+                    <span>{option.preview}</span>
+                    <strong>{option.title}</strong>
+                  </button>
+                );
+              })}
+            </div>
           </div>
           <label className="popup-toggle-row">
             <span>

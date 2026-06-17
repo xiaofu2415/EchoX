@@ -67,6 +67,10 @@ interface VerifyProviderMessage {
   config: ProviderConfig;
 }
 
+interface OpenOptionsPageMessage {
+  action: 'OPEN_OPTIONS_PAGE';
+}
+
 interface VerificationStage {
   name: string;
   ok: boolean;
@@ -1337,7 +1341,8 @@ chrome.runtime.onMessage.addListener(
       | AudioTranslationMessage
       | AbortTranslationMessage
       | ClearSubtitlesMessage
-      | VerifyProviderMessage,
+      | VerifyProviderMessage
+      | OpenOptionsPageMessage,
     sender,
     sendResponse
   ) => {
@@ -1351,6 +1356,23 @@ chrome.runtime.onMessage.addListener(
         )
       ).then(sendResponse);
       return true;
+    }
+
+    if (message.action === 'OPEN_OPTIONS_PAGE') {
+      if (chrome.runtime.openOptionsPage) {
+        void chrome.runtime
+          .openOptionsPage()
+          .then(() => sendResponse({ ok: true }))
+          .catch((error: unknown) =>
+            sendResponse({
+              ok: false,
+              error: error instanceof Error ? error.message : String(error)
+            })
+          );
+        return true;
+      }
+      sendResponse({ ok: false, error: 'openOptionsPage unavailable' });
+      return false;
     }
 
     if ((message as any).action === 'OFFSCREEN_READY') {

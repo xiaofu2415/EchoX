@@ -151,6 +151,38 @@ function sendError(state: SessionState, message: string): void {
   sendSessionMessage(state, 'OFFSCREEN_WS_ERROR', { message });
 }
 
+function trimRealtimeWindow(
+  text: string,
+  isChinese: boolean,
+  maxLength = isChinese ? 72 : 150
+): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  const start = Math.max(0, normalized.length - maxLength);
+  const recent = normalized.slice(start);
+  const boundary = isChinese
+    ? Math.max(
+        recent.lastIndexOf('。'),
+        recent.lastIndexOf('！'),
+        recent.lastIndexOf('？'),
+        recent.lastIndexOf('，')
+      )
+    : Math.max(
+        recent.lastIndexOf('. '),
+        recent.lastIndexOf('! '),
+        recent.lastIndexOf('? '),
+        recent.lastIndexOf(', ')
+      );
+
+  if (boundary > 0 && boundary < recent.length - 8) {
+    return recent.slice(boundary + (isChinese ? 1 : 2)).trim();
+  }
+  return recent.trim();
+}
+
 function handleGummyMessage(state: SessionState, data: any): boolean {
   if (!data.header?.event) {
     return false;
@@ -308,12 +340,22 @@ function handleRealtimeMessage(state: SessionState, data: any): void {
 
   let hasDelta = false;
 
+  if (data.type === 'response.audio_transcript.delta') {
+    state.currentEn = trimRealtimeWindow(
+      state.currentEn + (data.delta || ''),
+      false
+    );
+    hasDelta = true;
+  }
+
   if (
     data.type === 'response.text.delta' ||
-    data.type === 'response.translation.delta' ||
-    data.type === 'response.audio_transcript.delta'
+    data.type === 'response.translation.delta'
   ) {
-    state.currentZh += data.delta || '';
+    state.currentZh = trimRealtimeWindow(
+      state.currentZh + (data.delta || ''),
+      true
+    );
     hasDelta = true;
   }
 
@@ -345,10 +387,10 @@ function handleRealtimeMessage(state: SessionState, data: any): void {
 
     if (recentEn || recentZh) {
       if (recentEn) {
-        state.currentEn = recentEn;
+        state.currentEn = trimRealtimeWindow(recentEn, false);
       }
       if (recentZh) {
-        state.currentZh = recentZh;
+        state.currentZh = trimRealtimeWindow(recentZh, true);
       }
       hasDelta = true;
     }
@@ -365,7 +407,7 @@ function handleRealtimeMessage(state: SessionState, data: any): void {
     data.type === 'conversation.item.input_audio_transcription.completed' &&
     data.transcript
   ) {
-    state.currentEn = data.transcript;
+    state.currentEn = trimRealtimeWindow(data.transcript, false);
     hasDelta = true;
   }
 
@@ -387,23 +429,27 @@ function handleRealtimeMessage(state: SessionState, data: any): void {
     data.type === 'item.completed';
 
   if (isDone) {
-    if (data.transcript) {
-      state.currentZh = data.transcript;
+    if (
+      data.transcript &&
+      data.type !== 'response.audio_transcript.done' &&
+      !data.type.includes('input_audio_transcription')
+    ) {
+      state.currentZh = trimRealtimeWindow(data.transcript, true);
     }
     if (data.text) {
-      state.currentZh = data.text;
+      state.currentZh = trimRealtimeWindow(data.text, true);
     }
     if (data.translation) {
-      state.currentZh = data.translation;
+      state.currentZh = trimRealtimeWindow(data.translation, true);
     }
 
     if (data.item?.content) {
       for (const content of data.item.content) {
         if (content.transcript) {
-          state.currentZh = content.transcript;
+          state.currentEn = trimRealtimeWindow(content.transcript, false);
         }
         if (content.text) {
-          state.currentZh = content.text;
+          state.currentZh = trimRealtimeWindow(content.text, true);
         }
       }
     }

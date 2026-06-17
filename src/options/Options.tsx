@@ -10,7 +10,6 @@ import {
 } from '../shared/ProviderConfig';
 import './options.css';
 
-type DisplayMode = 'bilingual' | 'chinese';
 type OpenAiPreset =
   | 'openrouter'
   | 'deepseek'
@@ -149,44 +148,24 @@ const qwenModelOptions: Array<{
 }> = [
   {
     value: 'qwen3.5-livetranslate-flash-realtime',
-    title: 'Qwen3.5 实时语音翻译',
+    title: 'Qwen3.5 双语同传',
     group: '当前推荐',
-    description: '极低延迟双工同传，需 WebSocket',
+    description: '中英互译，音频+文本双语输出，需 WebSocket',
     audioMode: 'native'
   },
   {
     value: 'qwen3-livetranslate-flash-realtime',
-    title: 'Qwen3 实时语音翻译',
-    group: '备选实时流翻译',
-    description: '双工同传，需 WebSocket',
+    title: 'Qwen3 双语同传',
+    group: '备选双语同传',
+    description: '中英互译，音频+文本双语输出，需 WebSocket',
     audioMode: 'native'
   },
   {
     value: 'gummy-realtime-v1',
     title: 'Gummy 原生同传双语模型',
-    group: '双语专属',
-    description: '原生支持中英双语输出',
+    group: '历史模型 / 即将下架',
+    description: '预计 9 月开始下架，不推荐新配置',
     audioMode: 'native'
-  }
-];
-
-const modeOptions: Array<{
-  value: DisplayMode;
-  title: string;
-  description: string;
-  preview: string;
-}> = [
-  {
-    value: 'bilingual',
-    title: '双语对照',
-    description: '英文原文与中文翻译同时显示',
-    preview: 'EN / 中'
-  },
-  {
-    value: 'chinese',
-    title: '仅中文',
-    description: '隐藏英文，专注中文翻译',
-    preview: '中文'
   }
 ];
 
@@ -262,8 +241,6 @@ export const Options: React.FC<OptionsProps> = ({ variant = 'page' }) => {
   const [config, setConfig] = useState<ProviderConfig>(
     DEFAULT_PROVIDER_CONFIG
   );
-  const [displayMode, setDisplayMode] =
-    useState<DisplayMode>('bilingual');
   const [translationService, setTranslationService] =
     useState<TranslationService>('gemini');
   const [serviceMenuOpen, setServiceMenuOpen] = useState(false);
@@ -298,17 +275,11 @@ export const Options: React.FC<OptionsProps> = ({ variant = 'page' }) => {
     }
 
     chrome.storage.local.get(
-      [...PROVIDER_STORAGE_KEYS, 'displayMode'],
+      PROVIDER_STORAGE_KEYS,
       (result: Record<string, unknown>) => {
         const nextConfig = readProviderConfig(result);
         setConfig(nextConfig);
         setTranslationService(detectTranslationService(nextConfig));
-        if (
-          result.displayMode === 'bilingual' ||
-          result.displayMode === 'chinese'
-        ) {
-          setDisplayMode(result.displayMode);
-        }
       }
     );
   }, []);
@@ -412,10 +383,7 @@ export const Options: React.FC<OptionsProps> = ({ variant = 'page' }) => {
       }
 
       if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        await chrome.storage.local.set({
-          ...config,
-          displayMode
-        });
+        await chrome.storage.local.set(config);
       }
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2200);
@@ -525,7 +493,7 @@ export const Options: React.FC<OptionsProps> = ({ variant = 'page' }) => {
       <section className="options-card options-card--wide">
         <header className="options-header">
           <div className="brand-mark" aria-hidden="true">
-            <span>译</span>
+            <img src="icons/icon-128.png" alt="" />
           </div>
           <div className="options-heading">
             <div className="eyebrow">
@@ -819,7 +787,10 @@ export const Options: React.FC<OptionsProps> = ({ variant = 'page' }) => {
 
               {config.openaiAudioMode === 'native' ? (
                 <p className="inline-note inline-note--warning">
-                  Qwen 当前已全量接入 WebSocket 实时语音流大模型，为您带来零延迟的双工同传体验。
+                  {isQwenService(config) &&
+                  config.openaiModel === 'gummy-realtime-v1'
+                    ? 'Gummy 预计 9 月开始下架，不推荐新配置。建议优先切换到 Qwen3.5 或 Qwen3 实时双语同传模型。'
+                    : 'Qwen3.5 / Qwen3 实时双语同传模型支持中英互译，并可输出音频+文本双语结果，推荐用于直播同传。'}
                 </p>
               ) : (
                 <div className="stt-panel">
@@ -872,39 +843,6 @@ export const Options: React.FC<OptionsProps> = ({ variant = 'page' }) => {
               )}
             </section>
           )}
-
-          <section className="settings-section">
-            <div className="section-heading">
-              <div>
-                <h2>字幕显示</h2>
-                <p>播放时可以随时切换</p>
-              </div>
-            </div>
-            <div className="mode-grid" role="radiogroup">
-              {modeOptions.map((option) => {
-                const active = displayMode === option.value;
-                return (
-                  <button
-                    className={`mode-card${active ? ' mode-card--active' : ''}`}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    key={option.value}
-                    onClick={() => setDisplayMode(option.value)}
-                  >
-                    <span className="mode-preview">{option.preview}</span>
-                    <span className="mode-copy">
-                      <strong>{option.title}</strong>
-                      <small>{option.description}</small>
-                    </span>
-                    <span className="radio-indicator">
-                      <span />
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
 
           {error && <div className="form-error">{error}</div>}
 

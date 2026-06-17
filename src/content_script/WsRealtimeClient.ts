@@ -214,20 +214,27 @@ export class WsRealtimeClient {
 
   private dispatchSubtitle(id: string, textEn: string, textZh: string, isFinal: boolean) {
     if (id.startsWith(`live-${this.sessionId}`)) {
-      if (textEn.trim()) {
-        this.currentEn = textEn.trim();
-      }
-      if (textZh.trim()) {
-        this.currentZh = textZh.trim();
-      }
+      const nextEn = textEn.trim();
+      const nextZh = textZh.trim();
 
-      if (!this.currentEn || !this.currentZh) {
-        return;
-      }
+      if (nextEn && nextZh) {
+        textEn = nextEn;
+        textZh = nextZh;
+      } else {
+        if (nextEn) {
+          this.currentEn = nextEn;
+        }
+        if (nextZh) {
+          this.currentZh = nextZh;
+        }
 
-      id = `live-${this.sessionId}`;
-      textEn = this.currentEn;
-      textZh = this.currentZh;
+        if (!this.currentEn || !this.currentZh) {
+          return;
+        }
+
+        textEn = this.currentEn;
+        textZh = this.currentZh;
+      }
 
       if (isFinal) {
         this.currentEn = '';
