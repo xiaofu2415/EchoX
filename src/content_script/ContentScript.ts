@@ -1,13 +1,9 @@
 import { initializeButtonInjector, stopButtonInjector } from './ButtonInjector.js';
-import { initializeVodInterceptor } from './VodInterceptor.js';
+import { ECHOX_RUNTIME_BUILD } from '../shared/RuntimeVersion.js';
+
+console.log(`[VideoTranslator] EchoX runtime build: ${ECHOX_RUNTIME_BUILD}`);
 
 initializeButtonInjector();
-if (
-  location.hostname.endsWith('x.com') ||
-  location.hostname.endsWith('twitter.com')
-) {
-  initializeVodInterceptor();
-}
 
 window.addEventListener('pagehide', () => {
   stopButtonInjector();

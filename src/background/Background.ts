@@ -1,6 +1,6 @@
-import { setupWsRealtimeServer } from './WsRealtimeServer';
 import {
   audioFormatFromMimeType,
+  isDashScopeTaskRealtimeModel,
   getUnsupportedDashScopeModelReason,
   isDashScopeRealtimeModel,
   joinApiUrl,
@@ -50,8 +50,6 @@ interface AudioTranslationMessage {
 const TRANSLATION_TIMEOUT_MS = 15000;
 const OPENAI_TIMEOUT_MS = 25000;
 const POLLING_INTERVAL_MS = 1000;
-
-setupWsRealtimeServer();
 
 interface AbortTranslationMessage {
   action: 'ABORT_TRANSLATION';
@@ -236,6 +234,32 @@ function sendOffscreenStartMessage(
           return;
         }
         resolve();
+      });
+    };
+    attempt(retries);
+  });
+}
+
+function sendOffscreenRequest<T = any>(
+  payload: Record<string, unknown>,
+  retries = 15
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const attempt = (remaining: number) => {
+      chrome.runtime.sendMessage(payload, (response) => {
+        if (chrome.runtime.lastError) {
+          if (remaining > 0) {
+            setTimeout(() => attempt(remaining - 1), 200);
+          } else {
+            reject(new Error(chrome.runtime.lastError.message));
+          }
+          return;
+        }
+        if (!response?.ok) {
+          reject(new Error(response?.error || 'Offscreen request failed.'));
+          return;
+        }
+        resolve(response as T);
       });
     };
     attempt(retries);
@@ -938,6 +962,54 @@ async function verifyStage<T>(
   }
 }
 
+async function installDashScopeWebSocketAuthRule(apiKey: string): Promise<void> {
+  await chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: [1],
+    addRules: [
+      {
+        id: 1,
+        priority: 1,
+        action: {
+          type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS,
+          requestHeaders: [
+            {
+              header: 'Authorization',
+              operation: chrome.declarativeNetRequest.HeaderOperation.SET,
+              value: `Bearer ${apiKey}`
+            }
+          ]
+        },
+        condition: {
+          urlFilter: '*dashscope.aliyuncs.com/api-ws/v1/*',
+          resourceTypes: [
+            chrome.declarativeNetRequest.ResourceType.WEBSOCKET
+          ]
+        }
+      }
+    ]
+  });
+}
+
+async function verifyDashScopeRealtimeSocket(
+  config: ProviderConfig,
+  _signal: AbortSignal
+): Promise<string> {
+  await installDashScopeWebSocketAuthRule(config.openaiApiKey);
+
+  if (isDashScopeTaskRealtimeModel(config.openaiModel)) {
+    return 'Gummy 使用 DashScope 任务 WebSocket 协议，API Key 已通过基础配置检查。';
+  }
+
+  await ensureOffscreenDocument();
+  const response = await sendOffscreenRequest<{ ok: true; message: string }>({
+    target: 'offscreen',
+    action: 'verify_ws',
+    model: config.openaiModel,
+    apiKey: config.openaiApiKey
+  });
+  return response.message;
+}
+
 async function verifyProviderConfig(
   config: ProviderConfig
 ): Promise<VerificationResult> {
@@ -1010,7 +1082,14 @@ async function verifyProviderConfig(
         stages,
         async () => {
           if (config.openaiModel && isDashScopeRealtimeModel(config.openaiModel)) {
-            return JSON.stringify({ en: 'WS validation skipped', zh: '实时流模型（WebSocket）无需进行 HTTP 接口音频测试，API Key 有效即可使用。' });
+            const result = await verifyDashScopeRealtimeSocket(
+              config,
+              controller.signal
+            );
+            return JSON.stringify({
+              en: 'Realtime WebSocket ready',
+              zh: `实时模型 WebSocket 验证通过：${result}`
+            });
           }
           const response = await requestOpenAiNativeAudio(
             config,
@@ -1024,7 +1103,7 @@ async function verifyProviderConfig(
         },
         () =>
           config.openaiModel && isDashScopeRealtimeModel(config.openaiModel)
-            ? '实时模型（WebSocket）已跳过 HTTP 音频测试。'
+            ? '实时模型 WebSocket 握手验证通过。'
             : isDashScopeQwen(config)
               ? '接口、模型和 input_audio 音频输入均可用。'
               : '接口、模型和 input_audio 输入均可用。'
@@ -1402,39 +1481,15 @@ chrome.runtime.onMessage.addListener(
           throw new Error('Realtime session start was cancelled.');
         }
 
-        await chrome.declarativeNetRequest.updateDynamicRules({
-          removeRuleIds: [1],
-          addRules: [
-            {
-              id: 1,
-              priority: 1,
-              action: {
-                type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS,
-                requestHeaders: [
-                  {
-                    header: 'Authorization',
-                    operation: chrome.declarativeNetRequest.HeaderOperation.SET,
-                    value: `Bearer ${apiKey}`
-                  }
-                ]
-              },
-              condition: {
-                urlFilter: '*dashscope.aliyuncs.com/api-ws/v1/*',
-                resourceTypes: [
-                  chrome.declarativeNetRequest.ResourceType.WEBSOCKET
-                ]
-              }
-            }
-          ]
-        });
+        await installDashScopeWebSocketAuthRule(apiKey);
 
         await ensureOffscreenDocument();
         if (cancelledRealtimeStarts.has(sessionId)) {
           throw new Error('Realtime session start was cancelled.');
         }
-        const isGummy =
-          typeof model === 'string' && model.includes('gummy');
-        const wsUrl = isGummy
+        const useDashScopeTaskProtocol =
+          typeof model === 'string' && isDashScopeTaskRealtimeModel(model);
+        const wsUrl = useDashScopeTaskProtocol
           ? 'wss://dashscope.aliyuncs.com/api-ws/v1/inference/'
           : `wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model=${encodeURIComponent(model || '')}`;
 
@@ -1446,7 +1501,8 @@ chrome.runtime.onMessage.addListener(
             tabId,
             frameId,
             model,
-            config: {} 
+            apiKey,
+            config: {}
         });
       })
         .finally(() => {
@@ -1494,7 +1550,8 @@ chrome.runtime.onMessage.addListener(
     if (
       (message as any).action === 'OFFSCREEN_WS_SUBTITLE' ||
       (message as any).action === 'OFFSCREEN_WS_ERROR' ||
-      (message as any).action === 'OFFSCREEN_WS_NETWORK_PROFILE'
+      (message as any).action === 'OFFSCREEN_WS_NETWORK_PROFILE' ||
+      (message as any).action === 'OFFSCREEN_WS_DEBUG'
     ) {
       const targetTabId = (message as any).tabId;
       const targetFrameId = (message as any).frameId;

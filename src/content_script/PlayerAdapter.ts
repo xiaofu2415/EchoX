@@ -127,6 +127,23 @@ function findXControlBar(container: HTMLElement): HTMLElement | null {
   return bestMatch?.element || null;
 }
 
+function findFullscreenControl(
+  controlBar: HTMLElement
+): HTMLElement | null {
+  const controls = Array.from(
+    controlBar.querySelectorAll<HTMLElement>('button, [role="button"]')
+  ).filter((control) => !control.closest('#x-translator-btn-host'));
+
+  return (
+    controls.find((control) => {
+      const label = `${control.getAttribute('aria-label') || ''} ${
+        control.getAttribute('title') || ''
+      }`;
+      return /full\s*screen|exit\s*full\s*screen|全屏|退出全屏/i.test(label);
+    }) || null
+  );
+}
+
 function isYouTubeLive(
   video: HTMLVideoElement,
   player: HTMLElement
@@ -223,11 +240,55 @@ export function findPlayerContext(): PlayerContext | null {
   return findYouTubeContext() || findXContext();
 }
 
+export function findPlayerContextForVideo(
+  video: HTMLVideoElement
+): PlayerContext | null {
+  if (!video.isConnected || !isVisibleVideo(video)) {
+    return null;
+  }
+
+  if (location.hostname.endsWith('youtube.com')) {
+    const container = video.closest<HTMLElement>('.html5-video-player');
+    if (!container || !isYouTubeLive(video, container)) {
+      return null;
+    }
+
+    return {
+      site: 'youtube',
+      video,
+      container,
+      controlBar: container.querySelector<HTMLElement>('.ytp-right-controls'),
+      subtitleContainer: container,
+      isLive: true
+    };
+  }
+
+  if (
+    location.hostname.endsWith('x.com') ||
+    location.hostname.endsWith('twitter.com')
+  ) {
+    const container = findXContainer(video);
+    if (!container) {
+      return null;
+    }
+
+    return {
+      site: 'x',
+      video,
+      container,
+      controlBar: findXControlBar(container),
+      subtitleContainer: video.parentElement || container,
+      isLive: video.duration === Infinity
+    };
+  }
+
+  return null;
+}
+
 export function refreshPlayerContext(
   video: HTMLVideoElement
 ): PlayerContext | null {
-  const context = findPlayerContext();
-  return context?.video === video ? context : null;
+  return findPlayerContextForVideo(video);
 }
 
 export function attachButtonHost(
@@ -235,10 +296,69 @@ export function attachButtonHost(
   context: PlayerContext
 ): void {
   const { controlBar, container, site } = context;
+  const size = getButtonSize(site);
+
+  if (site === 'x') {
+    const fullscreen = controlBar ? findFullscreenControl(controlBar) : null;
+    const fullscreenWrapper = fullscreen?.parentElement || null;
+    const insertionParent = fullscreenWrapper?.parentElement || null;
+    if (fullscreenWrapper && insertionParent) {
+      if (
+        host.parentElement !== insertionParent ||
+        host.previousElementSibling !== fullscreenWrapper
+      ) {
+        fullscreenWrapper.insertAdjacentElement('afterend', host);
+      }
+      host.dataset.echoxPlacement = 'controls';
+      Object.assign(host.style, {
+        position: 'relative',
+        width: `${size}px`,
+        height: `${size}px`,
+        minWidth: `${size}px`,
+        maxWidth: `${size}px`,
+        bottom: 'auto',
+        right: 'auto',
+        zIndex: '1',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flex: `0 0 ${size}px`,
+        marginLeft: '4px',
+        pointerEvents: 'auto',
+        overflow: 'visible'
+      });
+      return;
+    }
+
+    if (host.parentElement !== container) {
+      container.appendChild(host);
+    }
+    host.dataset.echoxPlacement = 'hidden';
+    Object.assign(host.style, {
+      position: 'absolute',
+      width: `${size}px`,
+      height: `${size}px`,
+      minWidth: `${size}px`,
+      maxWidth: `${size}px`,
+      right: '8px',
+      bottom: '8px',
+      zIndex: '2147483647',
+      display: 'none',
+      pointerEvents: 'none',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flex: `0 0 ${size}px`,
+      margin: '0',
+      overflow: 'visible'
+    });
+    return;
+  }
+
   if (!controlBar) {
     if (host.parentElement !== container) {
       container.appendChild(host);
     }
+    host.dataset.echoxPlacement = 'overlay';
     Object.assign(host.style, {
       position: 'absolute',
       display: 'none',
@@ -266,6 +386,7 @@ export function attachButtonHost(
       leftControls.prepend(host);
     }
 
+    host.dataset.echoxPlacement = 'controls';
     host.classList.add('ytp-button');
     Object.assign(host.style, {
       position: 'relative',
@@ -288,16 +409,23 @@ export function attachButtonHost(
   if (host.parentElement !== controlBar) {
     controlBar.appendChild(host);
   }
+  host.dataset.echoxPlacement = 'controls';
   Object.assign(host.style, {
     position: 'relative',
+    width: `${size}px`,
+    height: `${size}px`,
+    minWidth: `${size}px`,
+    maxWidth: `${size}px`,
     bottom: 'auto',
     right: 'auto',
     zIndex: '1',
     display: 'inline-flex',
     alignItems: 'center',
-    flex: '0 0 auto',
+    justifyContent: 'center',
+    flex: `0 0 ${size}px`,
     marginLeft: '6px',
-    pointerEvents: 'auto'
+    pointerEvents: 'auto',
+    overflow: 'visible'
   });
 }
 

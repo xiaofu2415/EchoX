@@ -157,9 +157,9 @@ export const SubtitleManager: React.FC<SubtitleManagerProps> = ({
           ? compactSubtitleText(textZh, true, 64)
           : '';
 
-      // Live providers often stream the source transcript and translation in
-      // separate events. Keep the last complete pair visible until both arrive.
-      if (id.startsWith('live-') && (!normalizedEn || !normalizedZh)) {
+      // Live providers may emit the translation before the source transcript.
+      // Show Chinese as soon as it arrives and fill English later when present.
+      if (id.startsWith('live-') && !normalizedZh) {
         return;
       }
 

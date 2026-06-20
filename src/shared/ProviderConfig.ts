@@ -164,6 +164,19 @@ export function isDashScopeRealtimeModel(model: string): boolean {
   return model.toLowerCase().includes('realtime');
 }
 
+export function isDashScopeTaskRealtimeModel(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return normalized === 'gummy-realtime-v1';
+}
+
+export function isDashScopeLiveTranslateRealtimeModel(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return (
+    normalized === 'qwen3-livetranslate-flash-realtime' ||
+    normalized === 'qwen3.5-livetranslate-flash-realtime'
+  );
+}
+
 export function getUnsupportedDashScopeModelReason(model: string): string | null {
   const normalized = model.toLowerCase();
   // We now fully support DashScope realtime WebSocket models!

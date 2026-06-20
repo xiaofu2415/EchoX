@@ -1,4 +1,5 @@
 import { sendRuntimeMessageSafely } from './RuntimeMessaging.js';
+import { ECHOX_RUNTIME_BUILD } from '../shared/RuntimeVersion.js';
 
 /**
  * WsRealtimeClient - Content-script side WebSocket realtime translation engine.
@@ -14,18 +15,22 @@ import { sendRuntimeMessageSafely } from './RuntimeMessaging.js';
  */
 
 export class WsRealtimeClient {
+  private static readonly OUTPUT_SAMPLE_RATE = 16000;
   private static readonly DEFAULT_BATCH_MS = 128;
   private stream: MediaStream;
   private sessionId: string;
   private audioContext: AudioContext | null = null;
   private processor: ScriptProcessorNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
+  private silentGain: GainNode | null = null;
+  private trackReader: ReadableStreamDefaultReader<any> | null = null;
   private currentEn = '';
   private currentZh = '';
   private targetBatchMs = WsRealtimeClient.DEFAULT_BATCH_MS;
   private pendingPcmChunks: Int16Array[] = [];
   private pendingSampleCount = 0;
   private messageListener: ((msg: any) => void) | null = null;
+  private resumeListener: (() => void) | null = null;
   private stopped = false;
 
   constructor(stream: MediaStream, sessionId: string) {
@@ -38,7 +43,9 @@ export class WsRealtimeClient {
     if (this.stopped) {
       throw new Error('WebSocket realtime client has already been stopped.');
     }
-    console.log('[WsRealtimeClient] Starting WebSocket Realtime Engine via Offscreen Document...');
+    console.log(
+      `[WsRealtimeClient] Starting WebSocket Realtime Engine via Offscreen Document. runtime=${ECHOX_RUNTIME_BUILD}`
+    );
     
     const apiKey = config.openaiApiKey || config.vertexApiKey || config.geminiApiKey;
 
@@ -66,12 +73,17 @@ export class WsRealtimeClient {
       });
     });
     
-    // Step 3: Setup audio capture and encoding
-    this.audioContext = new AudioContext({ sampleRate: 16000 });
-    if (this.audioContext.state === 'suspended') {
-      console.log('[WsRealtimeClient] AudioContext suspended, resuming...');
-      await this.audioContext.resume();
+    // Step 3: Setup audio capture and encoding. Prefer direct track reads
+    // because auto-played videos can keep a new AudioContext suspended until
+    // the next user gesture.
+    if (this.startTrackProcessorCapture()) {
+      console.log(
+        '[WsRealtimeClient] Audio capture pipeline ready. MediaStreamTrackProcessor=running.'
+      );
+      return;
     }
+
+    this.audioContext = new AudioContext({ sampleRate: 16000 });
     this.source = this.audioContext.createMediaStreamSource(this.stream);
     
     // 512 frames at 16kHz is 32ms. Several samples may be merged
@@ -80,28 +92,28 @@ export class WsRealtimeClient {
     
     this.processor.onaudioprocess = (e) => {
       const inputData = e.inputBuffer.getChannelData(0);
-      
-      // Convert Float32 to Int16
-      const pcm16 = new Int16Array(inputData.length);
-      for (let i = 0; i < inputData.length; i++) {
-        const s = Math.max(-1, Math.min(1, inputData[i]));
-        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-      }
-      
-      this.pendingPcmChunks.push(pcm16);
-      this.pendingSampleCount += pcm16.length;
-
-      const sampleRate = this.audioContext?.sampleRate || 16000;
-      const targetSamples = Math.ceil(
-        sampleRate * (this.targetBatchMs / 1000)
+      this.enqueueFloat32Audio(
+        inputData,
+        e.inputBuffer.sampleRate ||
+          this.audioContext?.sampleRate ||
+          WsRealtimeClient.OUTPUT_SAMPLE_RATE
       );
-      if (this.pendingSampleCount >= targetSamples) {
-        this.flushAudioBuffer();
-      }
     };
     
+    this.silentGain = this.audioContext.createGain();
+    this.silentGain.gain.value = 0;
     this.source.connect(this.processor);
-    this.processor.connect(this.audioContext.destination);
+    this.processor.connect(this.silentGain);
+    this.silentGain.connect(this.audioContext.destination);
+    this.installResumeListeners();
+
+    if (this.audioContext.state === 'suspended') {
+      console.log('[WsRealtimeClient] AudioContext suspended, resuming...');
+      await this.resumeAudioContextWithTimeout();
+    }
+    console.log(
+      `[WsRealtimeClient] Audio capture pipeline ready. AudioContext=${this.audioContext.state}.`
+    );
   }
 
   public stop() {
@@ -120,11 +132,21 @@ export class WsRealtimeClient {
       chrome.runtime.onMessage.removeListener(this.messageListener);
       this.messageListener = null;
     }
+    this.removeResumeListeners();
+    if (this.trackReader) {
+      const reader = this.trackReader;
+      this.trackReader = null;
+      void reader.cancel().catch(() => undefined);
+    }
     
     if (this.processor) {
       this.processor.onaudioprocess = null;
       this.processor.disconnect();
       this.processor = null;
+    }
+    if (this.silentGain) {
+      this.silentGain.disconnect();
+      this.silentGain = null;
     }
     if (this.source) {
       this.source.disconnect();
@@ -148,6 +170,12 @@ export class WsRealtimeClient {
         this.dispatchSubtitle(msg.id, msg.textEn, msg.textZh, msg.isFinal);
       } else if (msg.action === 'OFFSCREEN_WS_NETWORK_PROFILE') {
         this.applyNetworkProfile(msg);
+      } else if (msg.action === 'OFFSCREEN_WS_DEBUG') {
+        const detail =
+          msg.detail && typeof msg.detail === 'object'
+            ? JSON.stringify(msg.detail)
+            : String(msg.detail || '');
+        console.log(`[WsRealtimeClient][Offscreen] ${msg.message} ${detail}`);
       } else if (msg.action === 'OFFSCREEN_WS_ERROR') {
         this.dispatchSubtitle(`error-${this.sessionId}`, '', msg.message, false);
       }
@@ -191,6 +219,246 @@ export class WsRealtimeClient {
     return 256;
   }
 
+  private startTrackProcessorCapture(): boolean {
+    const TrackProcessor = (
+      window as typeof window & {
+        MediaStreamTrackProcessor?: new (init: {
+          track: MediaStreamTrack;
+        }) => { readable: ReadableStream<any> };
+      }
+    ).MediaStreamTrackProcessor;
+    const audioTrack = this.stream.getAudioTracks()[0];
+    if (!TrackProcessor || !audioTrack) {
+      return false;
+    }
+
+    try {
+      const processor = new TrackProcessor({ track: audioTrack });
+      this.trackReader = processor.readable.getReader();
+      void this.pumpTrackProcessorAudio(this.trackReader);
+      return true;
+    } catch (error) {
+      console.debug(
+        '[WsRealtimeClient] MediaStreamTrackProcessor unavailable; falling back to Web Audio.',
+        error
+      );
+      this.trackReader = null;
+      return false;
+    }
+  }
+
+  private async pumpTrackProcessorAudio(
+    reader: ReadableStreamDefaultReader<any>
+  ): Promise<void> {
+    while (!this.stopped && this.trackReader === reader) {
+      let frame: any = null;
+      try {
+        const result = await reader.read();
+        if (result.done) {
+          break;
+        }
+        frame = result.value;
+        const audio = this.readAudioFrame(frame);
+        if (audio) {
+          this.enqueueFloat32Audio(audio.samples, audio.sampleRate);
+        }
+      } catch (error) {
+        if (!this.stopped) {
+          console.warn(
+            '[WsRealtimeClient] Audio track processor failed.',
+            error
+          );
+          this.dispatchSubtitle(
+            `audio-track-${this.sessionId}`,
+            'Audio track capture failed.',
+            '音频轨道读取中断，请暂停后重新播放或手动重启翻译。',
+            false
+          );
+        }
+        break;
+      } finally {
+        frame?.close?.();
+      }
+    }
+  }
+
+  private readAudioFrame(
+    frame: any
+  ): { samples: Float32Array; sampleRate: number } | null {
+    if (
+      !frame ||
+      typeof frame.copyTo !== 'function' ||
+      typeof frame.numberOfFrames !== 'number'
+    ) {
+      return null;
+    }
+
+    const frameCount = frame.numberOfFrames;
+    if (frameCount <= 0) {
+      return null;
+    }
+
+    const channelCount = Math.max(1, Number(frame.numberOfChannels) || 1);
+    const mixed = new Float32Array(frameCount);
+    const scratch = new Float32Array(frameCount);
+    let copiedChannels = 0;
+
+    for (let channelIndex = 0; channelIndex < channelCount; channelIndex++) {
+      try {
+        scratch.fill(0);
+        frame.copyTo(scratch, { planeIndex: channelIndex });
+      } catch {
+        break;
+      }
+
+      for (let i = 0; i < frameCount; i++) {
+        mixed[i] += scratch[i];
+      }
+      copiedChannels++;
+    }
+
+    if (copiedChannels === 0) {
+      return null;
+    }
+
+    if (copiedChannels > 1) {
+      for (let i = 0; i < mixed.length; i++) {
+        mixed[i] /= copiedChannels;
+      }
+    }
+
+    return {
+      samples: mixed,
+      sampleRate:
+        Number(frame.sampleRate) || WsRealtimeClient.OUTPUT_SAMPLE_RATE
+    };
+  }
+
+  private enqueueFloat32Audio(
+    inputData: Float32Array,
+    inputSampleRate: number
+  ): void {
+    if (this.stopped || inputData.length === 0) {
+      return;
+    }
+
+    const resampled =
+      Math.round(inputSampleRate) === WsRealtimeClient.OUTPUT_SAMPLE_RATE
+        ? inputData
+        : this.resampleFloat32(
+            inputData,
+            inputSampleRate,
+            WsRealtimeClient.OUTPUT_SAMPLE_RATE
+          );
+    const pcm16 = new Int16Array(resampled.length);
+    for (let i = 0; i < resampled.length; i++) {
+      const s = Math.max(-1, Math.min(1, resampled[i]));
+      pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+
+    this.pendingPcmChunks.push(pcm16);
+    this.pendingSampleCount += pcm16.length;
+
+    const targetSamples = Math.ceil(
+      WsRealtimeClient.OUTPUT_SAMPLE_RATE * (this.targetBatchMs / 1000)
+    );
+    if (this.pendingSampleCount >= targetSamples) {
+      this.flushAudioBuffer();
+    }
+  }
+
+  private resampleFloat32(
+    input: Float32Array,
+    inputSampleRate: number,
+    outputSampleRate: number
+  ): Float32Array {
+    if (
+      inputSampleRate <= 0 ||
+      outputSampleRate <= 0 ||
+      Math.round(inputSampleRate) === Math.round(outputSampleRate)
+    ) {
+      return input;
+    }
+
+    const ratio = inputSampleRate / outputSampleRate;
+    const outputLength = Math.max(1, Math.floor(input.length / ratio));
+    const output = new Float32Array(outputLength);
+
+    for (let i = 0; i < outputLength; i++) {
+      const sourceIndex = i * ratio;
+      const leftIndex = Math.floor(sourceIndex);
+      const rightIndex = Math.min(leftIndex + 1, input.length - 1);
+      const weight = sourceIndex - leftIndex;
+      output[i] = input[leftIndex] * (1 - weight) + input[rightIndex] * weight;
+    }
+
+    return output;
+  }
+
+  private async resumeAudioContextWithTimeout(): Promise<void> {
+    const context = this.audioContext;
+    if (!context || context.state !== 'suspended') {
+      return;
+    }
+
+    try {
+      await Promise.race([
+        context.resume(),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 800))
+      ]);
+    } catch (error) {
+      console.warn('[WsRealtimeClient] AudioContext resume failed:', error);
+    }
+
+    if (context.state === 'suspended') {
+      console.warn(
+        '[WsRealtimeClient] AudioContext is still suspended; waiting for browser audio activation.'
+      );
+      this.dispatchSubtitle(
+        `audio-context-${this.sessionId}`,
+        'Waiting for browser audio capture activation.',
+        '正在等待浏览器允许音频采集，请点击视频画面，或暂停后再播放。',
+        false
+      );
+    } else {
+      this.dispatchSubtitle(
+        `audio-context-${this.sessionId}`,
+        'Browser audio capture is active.',
+        '浏览器音频采集已启动。',
+        true
+      );
+    }
+  }
+
+  private installResumeListeners(): void {
+    if (this.resumeListener) {
+      return;
+    }
+    this.resumeListener = () => {
+      if (this.stopped || this.audioContext?.state !== 'suspended') {
+        return;
+      }
+      void this.resumeAudioContextWithTimeout();
+    };
+    window.addEventListener('pointerdown', this.resumeListener, true);
+    window.addEventListener('keydown', this.resumeListener, true);
+    for (const track of this.stream.getAudioTracks()) {
+      track.addEventListener?.('unmute', this.resumeListener);
+    }
+  }
+
+  private removeResumeListeners(): void {
+    if (!this.resumeListener) {
+      return;
+    }
+    window.removeEventListener('pointerdown', this.resumeListener, true);
+    window.removeEventListener('keydown', this.resumeListener, true);
+    for (const track of this.stream.getAudioTracks()) {
+      track.removeEventListener?.('unmute', this.resumeListener);
+    }
+    this.resumeListener = null;
+  }
+
   private flushAudioBuffer() {
     if (this.pendingSampleCount === 0) {
       return;
@@ -220,12 +488,13 @@ export class WsRealtimeClient {
       if (nextEn && nextZh) {
         textEn = nextEn;
         textZh = nextZh;
+      } else if (nextZh) {
+        textEn = nextEn || this.currentEn;
+        textZh = nextZh;
+        this.currentZh = nextZh;
       } else {
         if (nextEn) {
           this.currentEn = nextEn;
-        }
-        if (nextZh) {
-          this.currentZh = nextZh;
         }
 
         if (!this.currentEn || !this.currentZh) {

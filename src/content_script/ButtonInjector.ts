@@ -4,6 +4,7 @@ import { WsRealtimeClient } from './WsRealtimeClient.js';
 import { sendRuntimeMessageSafely } from './RuntimeMessaging.js';
 import {
   attachButtonHost,
+  findPlayerContextForVideo,
   findPlayerContext,
   getButtonSize,
   refreshPlayerContext,
@@ -24,6 +25,8 @@ import {
 
 type DisplayMode = 'bilingual' | 'chinese';
 
+const INJECTOR_TAKEOVER_EVENT = 'echox-translator:takeover';
+const injectorInstanceId = createSessionId();
 let pollIntervalId: any = null;
 let activeRecorder: LiveRecorder | null = null;
 let activeWsClient: WsRealtimeClient | null = null;
@@ -42,6 +45,7 @@ let isWaitingForSubtitle = false;
 const activeVideoListeners = new Map<string, EventListener>();
 const controlVisibilityHandlers = new WeakMap<HTMLElement, EventListener>();
 const controlVisibilityTimers = new WeakMap<HTMLElement, number>();
+const buttonHideTimers = new WeakMap<HTMLElement, number>();
 const EXPECTED_RUNTIME_ERRORS =
   /extension context invalidated|receiving end does not exist|message port closed/i;
 const webAudioCaptures = new WeakMap<
@@ -52,6 +56,51 @@ const webAudioCaptures = new WeakMap<
     destination: MediaStreamAudioDestinationNode;
   }
 >();
+
+window.addEventListener(INJECTOR_TAKEOVER_EVENT, (event) => {
+  const detail = (event as CustomEvent<{ instanceId?: string }>).detail;
+  if (detail?.instanceId && detail.instanceId !== injectorInstanceId) {
+    stopButtonInjector();
+  }
+});
+
+function isHostInPlayerContext(
+  host: Element,
+  context: PlayerContext
+): boolean {
+  return (
+    context.container.contains(host) ||
+    Boolean(context.controlBar?.contains(host)) ||
+    context.subtitleContainer.contains(host)
+  );
+}
+
+function findTranslatorButtonHost(
+  context: PlayerContext
+): HTMLElement | null {
+  const scopes = new Set<ParentNode>();
+  scopes.add(context.container);
+  scopes.add(context.subtitleContainer);
+  if (context.controlBar) {
+    scopes.add(context.controlBar);
+  }
+
+  for (const scope of scopes) {
+    const host = scope.querySelector?.(
+      '#x-translator-btn-host'
+    ) as HTMLElement | null;
+    if (host && isHostInPlayerContext(host, context)) {
+      return host;
+    }
+  }
+
+  const globalHost = document.querySelector(
+    '#x-translator-btn-host'
+  ) as HTMLElement | null;
+  return globalHost && isHostInPlayerContext(globalHost, context)
+    ? globalHost
+    : null;
+}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.action === 'GET_TRANSLATION_PLAYBACK_TIME') {
@@ -72,6 +121,9 @@ function placeButtonHost(
   context: PlayerContext
 ): void {
   attachButtonHost(host, context);
+  if (context.site === 'x' && host.dataset.echoxPlacement === 'controls') {
+    showButtonHost(host);
+  }
 
   const button = host.shadowRoot?.querySelector(
     '#x-translator-btn'
@@ -83,6 +135,42 @@ function placeButtonHost(
     button.style.padding = '0';
     button.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.3)';
   }
+}
+
+function showButtonHost(host: HTMLElement): void {
+  if (host.dataset.echoxPlacement === 'hidden') {
+    host.style.display = 'none';
+    host.style.pointerEvents = 'none';
+    return;
+  }
+  const timer = buttonHideTimers.get(host);
+  if (timer) {
+    window.clearTimeout(timer);
+    buttonHideTimers.delete(host);
+  }
+  host.style.display = 'inline-flex';
+  host.style.pointerEvents = 'auto';
+}
+
+function scheduleHideButtonHost(host: HTMLElement): void {
+  if (host.dataset.echoxPlacement === 'controls') {
+    showButtonHost(host);
+    return;
+  }
+  const existingTimer = buttonHideTimers.get(host);
+  if (existingTimer) {
+    window.clearTimeout(existingTimer);
+  }
+  const timer = window.setTimeout(() => {
+    buttonHideTimers.delete(host);
+    if (host.matches(':hover')) {
+      scheduleHideButtonHost(host);
+      return;
+    }
+    host.style.display = 'none';
+    host.style.pointerEvents = 'none';
+  }, 450);
+  buttonHideTimers.set(host, timer);
 }
 
 function bindControlVisibilitySync(
@@ -99,19 +187,25 @@ function bindControlVisibilitySync(
     }
     const timer = window.setTimeout(() => {
       controlVisibilityTimers.delete(videoContainer);
-      const currentHost = videoContainer.querySelector(
-        '#x-translator-btn-host'
-      ) as HTMLElement | null;
       const context = refreshPlayerContext(video);
+      const currentHost = context ? findTranslatorButtonHost(context) : null;
       if (currentHost && context) {
         placeButtonHost(currentHost, context);
       }
-    }, 80);
+    }, 160);
     controlVisibilityTimers.set(videoContainer, timer);
+  };
+  const hidePlacement = () => {
+    const context = refreshPlayerContext(video);
+    const currentHost = context ? findTranslatorButtonHost(context) : null;
+    if (context?.site === 'x' && currentHost) {
+      scheduleHideButtonHost(currentHost);
+    }
   };
 
   videoContainer.addEventListener('pointerenter', refreshPlacement, true);
   videoContainer.addEventListener('pointermove', refreshPlacement, true);
+  videoContainer.addEventListener('pointerleave', hidePlacement, true);
   controlVisibilityHandlers.set(videoContainer, refreshPlacement);
 }
 
@@ -634,7 +728,10 @@ function toggleSettingsPanel(
  * truth here.
  */
 function checkRouteAndInject(): void {
-  const context = findPlayerContext();
+  const context =
+    (activeVideo && (isTranslating || isStarting)
+      ? findPlayerContextForVideo(activeVideo)
+      : null) || findPlayerContext();
   if (!context) {
     cleanupAll();
     unbindAutoStartListener();
@@ -648,14 +745,14 @@ function checkRouteAndInject(): void {
   bindAutoStartListener(videoElement);
 
   // 3. Prevent duplicate button injection by checking host container
-  let host = videoParent.querySelector('#x-translator-btn-host') as HTMLElement | null;
+  let host = findTranslatorButtonHost(context);
   
   if (window.getComputedStyle(videoParent).position === 'static') {
     videoParent.style.position = 'relative';
   }
 
   bindControlVisibilitySync(videoParent, videoElement);
-  removeForeignButtonHosts(videoParent);
+  removeForeignButtonHosts(context, host);
 
   if (host && !document.body.contains(host)) {
     console.log('[EchoX] Detected detached translator button host. Forcing recreation.');
@@ -670,6 +767,17 @@ function checkRouteAndInject(): void {
     // Create host element for Shadow DOM encapsulation
     host = document.createElement('div');
     host.id = 'x-translator-btn-host';
+    const createdHost = host;
+    createdHost.addEventListener(
+      'pointerenter',
+      () => showButtonHost(createdHost),
+      true
+    );
+    host.addEventListener(
+      'pointerleave',
+      () => scheduleHideButtonHost(createdHost),
+      true
+    );
     
     const shadow = host.attachShadow({ mode: 'open' });
 
@@ -742,14 +850,30 @@ function checkRouteAndInject(): void {
   void maybeAutoStartTranslation(videoElement);
 }
 
-function removeForeignButtonHosts(currentContainer: HTMLElement): void {
+function removeForeignButtonHosts(
+  context: PlayerContext,
+  currentButtonHost: HTMLElement | null
+): void {
   const hosts = Array.from(
     document.querySelectorAll(
       '#x-translator-btn-host, #x-translator-settings-panel-host'
     )
   );
   for (const host of hosts) {
-    if (!currentContainer.contains(host)) {
+    if (host.id === 'x-translator-btn-host') {
+      if (host === currentButtonHost && isHostInPlayerContext(host, context)) {
+        continue;
+      }
+      host.remove();
+      continue;
+    }
+    if (
+      host.id === 'x-translator-settings-panel-host' &&
+      context.container.contains(host)
+    ) {
+      continue;
+    }
+    if (!isHostInPlayerContext(host, context)) {
       host.remove();
     }
   }
@@ -1258,6 +1382,11 @@ export function initializeButtonInjector(): void {
     console.warn('[ButtonInjector] Injector patrol loop is already active.');
     return;
   }
+  window.dispatchEvent(
+    new CustomEvent(INJECTOR_TAKEOVER_EVENT, {
+      detail: { instanceId: injectorInstanceId }
+    })
+  );
   checkRouteAndInject();
   pollIntervalId = setInterval(checkRouteAndInject, 1000);
   console.log('[ButtonInjector] Active keep-alive polling patrol initiated.');
